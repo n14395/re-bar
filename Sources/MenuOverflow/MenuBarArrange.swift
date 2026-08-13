@@ -68,24 +68,6 @@ final class ArrangeController {
         return nil
     }
 
-    /// Running apps that own at least one third-party bar item, per the
-    /// position store — the honest candidate list for "relaunch to re-read
-    /// the spacing" (a blind accessory-app scan would sweep in helpers that
-    /// own no item at all).
-    static func statusItemOwners() -> [NSRunningApplication] {
-        let apps = NSWorkspace.shared.runningApplications
-        var byPID: [pid_t: NSRunningApplication] = [:]
-        for key in readStore().keys where key.hasPrefix("status:") {
-            let body = String(key.dropFirst("status:".count))
-            guard let rr = body.range(of: "::") else { continue }
-            let token = String(body[..<rr.lowerBound])
-            guard !token.hasPrefix("com.apple."),
-                  let app = match(token: token, in: apps) else { continue }
-            byPID[app.processIdentifier] = app
-        }
-        return Array(byPID.values)
-    }
-
     // System modules that ARE ⌘-draggable get friendly names + symbols; the
     // clock and Control Center (BentoBox) are pinned by macOS and stay excluded.
     private static let moduleNames: [String: (String, String)] = [

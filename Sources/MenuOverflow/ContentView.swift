@@ -117,9 +117,6 @@ struct SpacingTab: View {
     @State private var spacing = Double(MenuBarSpacing.spacing)
     @State private var padding = Double(MenuBarSpacing.padding)
     @State private var status: String?
-    @State private var relaunch = SpacingRelaunchController()
-    @State private var showRelaunchSheet = false
-    @State private var showNoTargets = false
 
     private var dirty: Bool {
         Int(spacing) != MenuBarSpacing.spacing || Int(padding) != MenuBarSpacing.padding
@@ -164,77 +161,13 @@ struct SpacingTab: View {
             Divider()
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("Changes apply to each app the next time it launches. \"Apply to Running Apps\" relaunches background menu bar apps now; log out and back in to apply everywhere at once.")
+                Text("Changes apply to each app the next time it launches. To apply the new spacing everywhere at once, log out and back in.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                HStack {
-                    Button("Apply to Running Apps…") {
-                        relaunch.compute()
-                        if relaunch.targets.isEmpty { showNoTargets = true }
-                        else { showRelaunchSheet = true }
-                    }
-                    Button("Log Out…") { MenuBarSpacing.logOut() }
-                }
+                Button("Log Out…") { MenuBarSpacing.logOut() }
             }
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .sheet(isPresented: $showRelaunchSheet) { relaunchSheet }
-        .alert("No relaunchable menu bar apps", isPresented: $showNoTargets) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text("No background menu bar apps are running right now. Apps pick up the spacing the next time they launch.")
-        }
-    }
-
-    private var relaunchSheet: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(relaunch.finished ? "Relaunched \(relaunch.doneCount) of \(relaunch.targets.count) apps"
-                                   : "Relaunch these menu bar apps?")
-                .font(.headline)
-            if !relaunch.finished {
-                Text("Each app quits and reopens so it picks up the new spacing. Apps with unsaved state may ask before quitting; some may briefly show a window.")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
-            List(relaunch.targets) { t in
-                HStack(spacing: 8) {
-                    if let icon = t.icon {
-                        Image(nsImage: icon).resizable().aspectRatio(contentMode: .fit)
-                            .frame(width: 18, height: 18)
-                    }
-                    Text(t.name)
-                    Spacer()
-                    switch t.state {
-                    case .pending: EmptyView()
-                    case .quitting, .relaunching: ProgressView().controlSize(.small)
-                    case .done: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                    case .skippedNoQuit: Text("didn't quit — skipped").font(.caption).foregroundStyle(.secondary)
-                    case .failedLaunch: Text("couldn't relaunch").font(.caption).foregroundStyle(.red)
-                    }
-                }
-            }
-            .frame(minHeight: 160, maxHeight: 240)
-            .scrollContentBackground(.hidden)
-            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
-            if relaunch.finished {
-                Text("Skipped apps pick up the spacing next time you open them.")
-                    .font(.caption2).foregroundStyle(.tertiary)
-            }
-            HStack {
-                Spacer()
-                if relaunch.finished {
-                    Button("Done") { showRelaunchSheet = false }.buttonStyle(.borderedProminent)
-                } else {
-                    Button("Cancel") { showRelaunchSheet = false }.disabled(relaunch.running)
-                    Button("Relaunch \(relaunch.targets.count) Apps") {
-                        Task { await relaunch.run() }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(relaunch.running)
-                }
-            }
-        }
-        .padding(16)
-        .frame(width: 380)
     }
 
     private func isActive(_ p: Preset) -> Bool {

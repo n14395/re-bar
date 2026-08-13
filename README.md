@@ -7,12 +7,8 @@ A small macOS menu-bar utility for people whose menu bar is full. Three tabs:
 Tightens the gap between menu bar items by writing the ByHost global defaults
 `NSStatusItemSpacing` / `NSStatusItemSelectionPadding` (sliders + presets from
 Default 16 pt down to Packed 0 pt). macOS reads these once per app process, at
-status-item creation, so changes apply per app at its next launch:
-
-- **Apply to Running Apps…** politely quits and reopens background menu-bar
-  apps (never regular apps, never Apple software) so they pick the value up
-  immediately.
-- **Log Out…** applies everywhere at once.
+status-item creation, so changes apply per app at its next launch. To apply the
+new spacing everywhere at once, use **Log Out…** and log back in.
 
 ## Color
 
