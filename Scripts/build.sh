@@ -1,12 +1,24 @@
 #!/bin/zsh
-# Build MenuOverflow.app — a tiny menu-bar-spacing utility.
-# Usage: Scripts/build-app.sh [--install]   (--install copies to ~/Applications)
+# Build MenuOverflow.app — a tiny menu-bar utility — and package a .dmg.
+# Usage: Scripts/build-app.sh [--install] [--no-dmg]
+#   --install   also copy the .app to ~/Applications
+#   --no-dmg    skip the .dmg (faster dev iteration; the .dmg is built by default)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # The full Xcode toolchain provides the SwiftUI macro plugins the bare
 # Command Line Tools lack.
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode-beta.app/Contents/Developer}"
+
+INSTALL=0
+MAKE_DMG=1
+for arg in "$@"; do
+  case "$arg" in
+    --install) INSTALL=1 ;;
+    --no-dmg)  MAKE_DMG=0 ;;
+    *) echo "Unknown option: $arg (use --install and/or --no-dmg)" >&2; exit 2 ;;
+  esac
+done
 
 swift build -c release
 
@@ -36,9 +48,28 @@ else
 fi
 echo "Built $APP"
 
-if [[ "${1:-}" == "--install" ]]; then
+if [[ "$INSTALL" == 1 ]]; then
   mkdir -p ~/Applications
   rm -rf ~/Applications/MenuOverflow.app
   cp -R "$APP" ~/Applications/MenuOverflow.app
   echo "Installed to ~/Applications/MenuOverflow.app"
+fi
+
+# Package a distributable disk image: the app + a drag-to-install /Applications
+# symlink, compressed (UDZO), HFS+ for maximum mount compatibility. NOTE: the
+# app is signed with an Apple Development cert, NOT notarized (no Developer ID
+# cert on this machine), so a first launch on another Mac is Gatekeeper-blocked
+# until the user right-clicks → Open (or clears the quarantine xattr).
+if [[ "$MAKE_DMG" == 1 ]]; then
+  VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" Resources/Info.plist 2>/dev/null || true)
+  DMG="build/MenuOverflow${VERSION:+-$VERSION}.dmg"
+  echo "Packaging $DMG …"
+  STAGING=$(mktemp -d)
+  ditto "$APP" "$STAGING/MenuOverflow.app"      # ditto preserves the code signature faithfully
+  ln -s /Applications "$STAGING/Applications"   # drag-to-install target
+  rm -f "$DMG"
+  hdiutil create -volname "MenuOverflow" -srcfolder "$STAGING" \
+                 -fs HFS+ -format UDZO -ov -quiet "$DMG"
+  rm -rf "$STAGING"
+  echo "Built $DMG"
 fi
