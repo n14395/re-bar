@@ -32,6 +32,7 @@ struct SettingsExportV1: Codable {
     var mirror: MirrorSettings
     var showMenuBarIcon: Bool
     var arrangeShowInactive: Bool
+    var arrangeShowInactiveApps: Bool? = nil   // absent in older exports → treated as on
     var startAtLogin: Bool
 }
 
@@ -47,6 +48,7 @@ enum SettingsTransfer {
             mirror: mirror.exportSettings(),
             showMenuBarIcon: UserDefaults.standard.object(forKey: "showMenuBarIcon") as? Bool ?? true,
             arrangeShowInactive: UserDefaults.standard.bool(forKey: "arrange.showInactive"),
+            arrangeShowInactiveApps: UserDefaults.standard.object(forKey: "arrange.showInactiveApps") as? Bool ?? true,
             startAtLogin: SMAppService.mainApp.status == .enabled)
         do {
             let enc = JSONEncoder()
@@ -86,6 +88,7 @@ enum SettingsTransfer {
         MenuBarSpacing.apply(spacing: s.spacing.spacing, padding: s.spacing.padding)
         UserDefaults.standard.set(s.showMenuBarIcon, forKey: "showMenuBarIcon")
         UserDefaults.standard.set(s.arrangeShowInactive, forKey: "arrange.showInactive")
+        UserDefaults.standard.set(s.arrangeShowInactiveApps ?? true, forKey: "arrange.showInactiveApps")
         mirror.importSettings(s.mirror)
         let svc = SMAppService.mainApp
         do {

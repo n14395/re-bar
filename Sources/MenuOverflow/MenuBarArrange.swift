@@ -97,6 +97,8 @@ final class ArrangeController {
     func load() {
         let dict = Self.readStore()
         let apps = NSWorkspace.shared.runningApplications
+        // Absent key = on, so the not-running rows stay visible by default.
+        let showInactiveApps = UserDefaults.standard.object(forKey: "arrange.showInactiveApps") as? Bool ?? true
         struct Cand {
             let key: String, autosave: String, token: String, pos: Double
             let app: NSRunningApplication, exactBundle: Bool
@@ -117,7 +119,7 @@ final class ArrangeController {
                 // parked until the next launch. Show it (grayed) instead of
                 // silently vanishing; truly stale keys (app gone) stay hidden
                 // and are Clean Up's business.
-                if let url = Self.bundleURL(for: token) {
+                if showInactiveApps, let url = Self.bundleURL(for: token) {
                     let ident = "\(url.path)|\(autosave)"
                     let exact = Bundle(url: url)?.bundleIdentifier == token
                     if let existing = offline[ident], !(exact && !existing.exact) { continue }
@@ -322,6 +324,7 @@ final class ArrangeController {
 struct ArrangeTab: View {
     @Bindable var arrange: ArrangeController
     @AppStorage("arrange.showInactive") private var showInactive = false
+    @AppStorage("arrange.showInactiveApps") private var showInactiveApps = true
     @State private var cleanupCandidates: [ArrangeController.CleanupCandidate] = []
     @State private var showCleanupConfirm = false
     @State private var showCleanupEmpty = false
@@ -391,6 +394,10 @@ struct ArrangeTab: View {
             Toggle("Show inactive system items (Siri, camera indicator, …)", isOn: $showInactive)
                 .font(.callout)
                 .onChange(of: showInactive) { _, _ in arrange.load() }
+
+            Toggle("Show inactive apps (installed but not running)", isOn: $showInactiveApps)
+                .font(.callout)
+                .onChange(of: showInactiveApps) { _, _ in arrange.load() }
 
             HStack {
                 Button("Apply Order") { arrange.apply() }
