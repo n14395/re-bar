@@ -785,6 +785,139 @@ private final class MirrorEngine: @unchecked Sendable {
     }
 }
 
+// MARK: - Background tint (permission-free path)
+
+/// How the bar gets recolored. `.mirror` captures the bar and redraws all of
+/// it — icons included — which needs Screen Recording and shows the system's
+/// recording indicators. `.tint` lays a translucent wash of the theme color
+/// over the bar: everything stays visible through it, uniformly tinted, and
+/// nothing ever reads the screen — no permission, no indicator.
+enum RecolorStyle: String, CaseIterable, Sendable {
+    case mirror, tint
+}
+
+/// One click-through panel per display laid OVER the bar as a translucent
+/// wash of the theme background — icons and menus stay legible through it,
+/// uniformly tinted.
+///
+/// A behind-the-bar panel (the Ice/Thaw placement, one level below the bar so
+/// only the backdrop picks up the color) was tried first and is measurably
+/// dead on macOS 27 beta 26A5421a: the bar's material composites as an opaque
+/// raster with its wallpaper blur baked in, and windows beneath it are
+/// occlusion-culled outright — a panel at ANY lower level contributes nothing
+/// (verified with saturated-color probes at levels 3–24; only level ≥ the
+/// bar's own shows up at all). The wash above the bar is the one capture-free
+/// recolor lever left on this build.
+@MainActor
+final class TintOverlay {
+    /// Strong enough to read as the theme color, weak enough that glyph
+    /// contrast survives underneath.
+    private static let washAlpha = 0.45
+
+    private var panels: [CGDirectDisplayID: NSPanel] = [:]
+    private var theme: MirrorTheme?
+    private(set) var running = false
+
+    var activeDisplays: Int { running ? panels.count : 0 }
+
+    func apply(_ theme: MirrorTheme) {
+        self.theme = theme
+        if running { layout() }
+    }
+
+    func start() {
+        running = true
+        layout()
+    }
+
+    func stop() {
+        running = false
+        for p in panels.values { p.orderOut(nil) }
+        panels.removeAll()
+    }
+
+    /// Screens changed (resolution, arrangement, plug/unplug) — rebuild frames.
+    func refreshFrames() {
+        if running { layout() }
+    }
+
+    func onSpaceChanged() {
+        guard running else { return }
+        for p in panels.values {
+            pinWindowToAllSpaces(p.windowNumber)   // catch newly-created Spaces
+            p.orderFrontRegardless()
+        }
+    }
+
+    private func layout() {
+        guard let theme else { return }
+        var kept: Set<CGDirectDisplayID> = []
+        for screen in NSScreen.screens {
+            guard let num = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+            else { continue }
+            let did = CGDirectDisplayID(num.uint32Value)
+            // Bar height: what visibleFrame excludes at the top, with the
+            // notch-adjacent safe area as a floor (it under-reports by 1 pt
+            // here: aux 38 vs bar 39). A zero height (menu bar set to
+            // auto-hide) gets no panel — a bare colored stripe would just
+            // sit on the desktop.
+            let h = max(screen.auxiliaryTopLeftArea?.height ?? 0,
+                        screen.frame.maxY - screen.visibleFrame.maxY)
+            guard h > 1, h < 80 else { continue }
+            kept.insert(did)
+            let panel = panels[did] ?? makePanel(did: did)
+            panel.sharingType = theme.showInScreenshots ? .readOnly : .none
+            panel.setFrame(NSRect(x: screen.frame.minX, y: screen.frame.maxY - h,
+                                  width: screen.frame.width, height: h), display: true)
+            if let layer = panel.contentView?.layer as? CAGradientLayer {
+                // A single-stop gradient layer renders nothing — duplicate the
+                // color for the solid case.
+                var stops = [theme.bg]
+                if theme.gradient {
+                    if let m = theme.bgMid { stops.append(m) }
+                    stops.append(theme.bg2)
+                } else {
+                    stops.append(theme.bg)
+                }
+                layer.colors = stops.map {
+                    CGColor(srgbRed: $0.x, green: $0.y, blue: $0.z, alpha: Self.washAlpha)
+                }
+            }
+            panel.orderFrontRegardless()
+        }
+        for (did, panel) in panels where !kept.contains(did) {
+            panel.orderOut(nil); panels[did] = nil
+        }
+    }
+
+    private func makePanel(did: CGDirectDisplayID) -> NSPanel {
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 100, height: 24),
+                            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.ignoresMouseEvents = true            // clicks land on the real bar
+        panel.isMovable = false
+        panel.isReleasedWhenClosed = false
+        panel.isExcludedFromWindowsMenu = true
+        // Over the bar (same level as the mirror overlay — the two modes are
+        // never active together). See the class note for why "one level below"
+        // does not work on this OS.
+        panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.statusWindow)))
+        panel.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle]
+        let v = NSView(frame: .zero)
+        let gradient = CAGradientLayer()
+        gradient.startPoint = CGPoint(x: 0, y: 0.5)
+        gradient.endPoint = CGPoint(x: 1, y: 0.5)
+        v.layer = gradient           // layer-hosting: the layer tracks the view's bounds
+        v.wantsLayer = true
+        panel.contentView = v
+        panels[did] = panel
+        pinWindowToAllSpaces(panel.windowNumber)   // eager per-Space membership (no join lag)
+        return panel
+    }
+}
+
 // MARK: - Controller (SwiftUI-facing state)
 
 // Persisted so a relaunch — in particular a silent login-item start — restores
@@ -797,6 +930,7 @@ private let kTint = "mirror.desktopTint", kBoost = "mirror.boostFaint"
 private let kShots = "mirror.showInScreenshots"
 private let kColoredIcons = "mirror.coloredIcons"
 private let kNotchFade = "mirror.notchFade"
+private let kStyle = "mirror.style"
 private let kKeepColors = "mirror.keepColors"   // legacy boolean this replaced
 private let kFollow = "mirror.followAppearance"
 private let kThemeLight = "mirror.themeLight", kThemeDark = "mirror.themeDark"
@@ -821,6 +955,14 @@ final class MenuBarMirrorController {
             guard enabled != oldValue else { return }
             UserDefaults.standard.set(enabled, forKey: kEnabled)
             enabled ? start() : stop()
+        }
+    }
+    /// Which recolor path runs while `enabled` — flipping it live swaps engines.
+    var recolorStyle = RecolorStyle(rawValue: UserDefaults.standard.string(forKey: kStyle) ?? "") ?? .mirror {
+        didSet {
+            guard recolorStyle != oldValue else { return }
+            UserDefaults.standard.set(recolorStyle.rawValue, forKey: kStyle)
+            if enabled { stop(); start() }
         }
     }
     var bgColor = savedColor(kBG, or: Color(red: 0.10, green: 0.11, blue: 0.16))
@@ -882,6 +1024,7 @@ final class MenuBarMirrorController {
     private(set) var stats = MirrorStats()
 
     private let engine = MirrorEngine()
+    private let tintOverlay = TintOverlay()
     private var statsTimer: Timer?
     private var screenObserver: NSObjectProtocol?
     private var spaceObserver: NSObjectProtocol?
@@ -892,7 +1035,10 @@ final class MenuBarMirrorController {
         spaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.engine.onSpaceChanged() }
+            MainActor.assumeIsolated {
+                self?.engine.onSpaceChanged()
+                self?.tintOverlay.onSpaceChanged()
+            }
         }
         screenObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
@@ -937,7 +1083,17 @@ final class MenuBarMirrorController {
         }
     }
 
-    private func pushDisplays() { engine.setDisplays(snapshotDisplays()) }
+    private func pushDisplays() {
+        engine.setDisplays(snapshotDisplays())
+        tintOverlay.refreshFrames()
+    }
+
+    /// Hand the resolved theme to both paths — each is a no-op while inactive.
+    private func pushTheme() {
+        let t = currentTheme()
+        engine.setTheme(t)
+        tintOverlay.apply(t)
+    }
 
     private func currentTheme() -> MirrorTheme {
         let spec = followAppearance ? slotSpec(systemIsDark ? .dark : .light) : editingSpec()
@@ -967,7 +1123,7 @@ final class MenuBarMirrorController {
         d.set(showInScreenshots, forKey: kShots)
         d.set(coloredIcons.rawValue, forKey: kColoredIcons)
         d.set(notchFade, forKey: kNotchFade)
-        engine.setTheme(currentTheme())
+        pushTheme()
     }
 
     // MARK: Appearance slots
@@ -1003,7 +1159,7 @@ final class MenuBarMirrorController {
             .bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
         guard dark != systemIsDark else { return }
         systemIsDark = dark
-        if followAppearance { engine.setTheme(currentTheme()) }
+        if followAppearance { pushTheme() }
     }
 
     // MARK: Presets
@@ -1065,6 +1221,7 @@ final class MenuBarMirrorController {
               boostFaint: boostFaint, showInScreenshots: showInScreenshots,
               coloredIcons: coloredIcons.rawValue,
               notchFade: notchFade,
+              style: recolorStyle.rawValue,
               gradient: gradientOn,
               bg: rgb(bgColor), bgMid: threeColorOn ? rgb(bgMidColor) : nil,
               bg2: rgb(bg2Color), fg: rgb(fgColor),
@@ -1092,23 +1249,34 @@ final class MenuBarMirrorController {
         // If follow was already on, the didSet skipped — make the editing surface
         // reflect the imported slot rather than the standalone colors.
         if followAppearance { loadEditingSurface(slotSpec(editingSlot)) }
+        recolorStyle = RecolorStyle(rawValue: m.style ?? "") ?? .mirror
         enabled = m.enabled          // didSet starts/stops the engine — set last
         applyTheme()
     }
 
     func start() {
-        permissionGranted = screenCapturePermissionNow()
-        engine.setTheme(currentTheme())
-        engine.setDisplays(snapshotDisplays())
-        engine.start()
+        switch recolorStyle {
+        case .mirror:
+            permissionGranted = screenCapturePermissionNow()
+            engine.setTheme(currentTheme())
+            engine.setDisplays(snapshotDisplays())
+            engine.start()
+        case .tint:
+            tintOverlay.apply(currentTheme())
+            tintOverlay.start()
+        }
         statsTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                self.stats = self.engine.snapshotStats()
+                self.stats = self.recolorStyle == .mirror
+                    ? self.engine.snapshotStats()
+                    : MirrorStats(activeDisplays: self.tintOverlay.activeDisplays)
                 self.appearanceDidChange()   // self-heal if both observers miss a flip
                 // The permission/background probes cost a capture + full pixel
-                // scan each — only worth paying while their notices are visible.
-                if self.settingsWindowVisible { self.refreshChecks() }
+                // scan each — mirror-only, and only while their notices can be
+                // seen. In tint mode the whole point is that nothing ever
+                // reads the screen.
+                if self.settingsWindowVisible && self.recolorStyle == .mirror { self.refreshChecks() }
             }
         }
     }
@@ -1126,6 +1294,7 @@ final class MenuBarMirrorController {
 
     func stop() {
         engine.stop()
+        tintOverlay.stop()
         statsTimer?.invalidate(); statsTimer = nil
         stats = MirrorStats()
     }

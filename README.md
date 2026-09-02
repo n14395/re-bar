@@ -5,120 +5,101 @@
 ![Interface](https://img.shields.io/badge/UI-SwiftUI-purple)
 
 A macOS utility for people whose menu bar is full. Tighten the spacing between
-items, recolor the whole bar with a live themed overlay, and put the items in
-the order you want.
+items, recolor the bar, and put the items in the order you want.
 
-<!-- TODO: add a screenshot/banner here, e.g. docs/screenshot.png -->
+<!-- TODO: add a screenshot here, e.g. docs/screenshot.png -->
 
 ## Features
 
 ### Spacing
 
-Tighten the gap between menu bar items — sliders and presets from the system
-default (16 pt) down to Packed (0 pt). Works by writing the ByHost global
-defaults `NSStatusItemSpacing` / `NSStatusItemSelectionPadding`; no private
-API and no special permission required.
+Shrink the gap between menu bar items — from the system default of 16 pt all
+the way down to zero — using sliders or presets.
 
-macOS reads these values once per app, at launch, so changes apply to each app
-the next time it starts. The **Log Out…** button applies the new spacing
-everywhere at once.
+macOS reads the spacing once per app, at launch, so a change applies to each
+app the next time it starts. The **Log Out…** button applies it everywhere at
+once.
 
 ### Color
 
-A live *themed mirror* of the menu bar: the real bar is captured, its glyphs
-are extracted by a self-matting recolor pipeline, and a click-through overlay
-draws the same layout in your colors. Clicks pass straight through to the real
-bar underneath.
+Recolor the menu bar with solid colors or 2- and 3-stop gradients, with
+separate light and dark themes. Ships with presets and lets you save your own.
+Genuinely-colored icons (the low-battery indicator, for example) can be kept as
+they are, muted, or repainted to match. Optional extras include a fade around
+the notch, per-desktop wallpaper tinting, and whether the color shows up in
+screenshots and screen sharing.
 
-- Solid colors and 2- or 3-stop gradients, with separate light/dark themes
-  ("Match system appearance").
-- Built-in presets plus custom saved presets — save, rename, update, delete;
-  saving under an existing name replaces it.
-- **Colored icons** modes: *Original* keeps genuinely-colored icons intact
-  (the low-power battery stays yellow), *Muted* softens them to half contrast,
-  *Themed* repaints everything uniformly.
-- Optional fade-to-black around the notch (shown on notched displays only).
-- Per-desktop wallpaper tinting, faint-icon boosting, and optional visibility
-  in screenshots and screen sharing.
-- Efficient by design: renders at up to 20 Hz but skips all work while the bar
-  is unchanged, dropping to a low-power cadence when idle.
-
-The mirror needs **Screen Recording** permission; the captured pixels never
-leave your Mac. While the mirror runs, macOS shows its standard
-screen-recording indicator — an inherent cost of any app that reads the
-screen.
+MenuOverflow reads the real bar and draws a click-through overlay on top of it,
+so clicks still land on the real items underneath. This needs **Screen
+Recording** permission, and macOS will show its recording indicator while the
+overlay is running. The captured pixels never leave your Mac.
 
 ### Arrange
 
-Reorder third-party menu bar items and movable system modules — drag rows or
-use the chevron buttons, then apply. Works by rewriting the system's item
-position store and restarting the menu bar agent (the bar disappears for a few
-seconds, then returns in the new order).
+Drag menu bar items into the order you want — third-party items plus movable
+system ones like Wi-Fi and Battery. The clock and Control Center are pinned by
+macOS and can't be moved.
 
-- Items of installed-but-not-running apps are listed too (grayed, with a
-  launch button) — toggleable via **Show inactive apps**.
-- **Show inactive system items** reveals movable-but-hidden system items
-  (Siri, camera indicator, …).
-- **Clean Up…** removes provably-stale entries from the position store. The
-  full store is backed up to `~/Library/Application Support/MenuOverflow/`
-  before every write.
+- Items belonging to installed-but-not-running apps are listed too, greyed out
+  and with a button to launch them.
+- **Show inactive system items** reveals items that are movable but currently
+  hidden, such as Siri and the camera indicator.
+- **Clean Up…** removes stale entries left behind by uninstalled apps.
 
-### Extras
+Applying an order restarts the menu bar, so it disappears for a few seconds
+before coming back. The layout is backed up to
+`~/Library/Application Support/MenuOverflow/` before every change.
 
-- Runs quietly in the background; optional menu bar icon; start at login.
-- Settings export/import as versioned JSON.
+### Elsewhere
 
-## Installation
+Runs in the background with an optional menu bar icon, can start at login, and
+exports and imports its settings as JSON.
 
-Download the `.dmg` from the [Releases](../../releases) page, open it, and
-drag **MenuOverflow** to Applications.
+## Install
 
-> **Note on first launch:** releases are signed with a development
-> certificate but not notarized, so Gatekeeper will block the first open.
-> Right-click the app → **Open** → **Open** (or approve it under
-> System Settings → Privacy & Security).
+Download the latest `.dmg` from the [Releases](../../releases) page, open it,
+and drag **MenuOverflow** to Applications.
+
+If macOS blocks the app the first time you open it, right-click it and choose
+**Open**, or approve it under System Settings → Privacy & Security.
 
 ### Permissions
 
-| Permission | Used for | Required? |
-|---|---|---|
-| Screen Recording | The Color tab's themed mirror | Only for recoloring |
-| Automation (System Events) | The Spacing tab's **Log Out…** button | Only for logout |
+| Permission | Needed for |
+| --- | --- |
+| Screen Recording | The Color tab |
+| Automation (System Events) | The **Log Out…** button on the Spacing tab |
 
-Spacing and Arrange work without any special permissions.
+Spacing and Arrange need no special permissions.
 
-## Building from source
+## Building
 
-Requires Xcode (the SwiftUI macros need the full toolchain, not just the
-Command Line Tools).
+Requires full Xcode — the SwiftUI macros need the complete toolchain, not just
+the Command Line Tools.
 
 ```sh
-Scripts/build-app.sh              # builds build/MenuOverflow.app + a versioned .dmg
-Scripts/build-app.sh --install    # …and copies the app to ~/Applications
-Scripts/build-app.sh --no-dmg     # skip the .dmg for faster iteration
+./build.sh                 # build/MenuOverflow.app
+./build.sh --dmg           # …and package it as build/MenuOverflow.dmg
+./build.sh --sign          # …Developer ID sign it, notarize and staple
+./build.sh --publish v1.2  # tag and cut a GitHub release from the .dmg
 ```
 
-Point `DEVELOPER_DIR` at your Xcode if it isn't the default, e.g.
-`DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer`.
+Flags combine, so `./build.sh --sign --publish v1.2` does the whole release in
+one go. If Xcode isn't your default toolchain, point `DEVELOPER_DIR` at it:
 
-The script builds with Swift Package Manager, assembles the app bundle, and
-signs it with your Apple Development identity when one exists (a stable
-signing identity keeps macOS permission grants across rebuilds; it falls back
-to ad-hoc signing otherwise).
+```sh
+DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer ./build.sh
+```
 
-### Working in Xcode
-
-The Xcode project is generated from `project.yml` with
-[XcodeGen](https://github.com/yonaskolb/XcodeGen) and is not checked in:
+To work in Xcode, generate the project with
+[XcodeGen](https://github.com/yonaskolb/XcodeGen) — it isn't checked in:
 
 ```sh
 brew install xcodegen   # once
-xcodegen generate       # creates MenuOverflow.xcodeproj
+xcodegen generate
 ```
 
 ## Compatibility
 
-Minimum macOS 15; developed and tested against current macOS 27 betas. The
-Color and Arrange backends track private WindowServer / menu-bar-agent
-behavior, which Apple changes between OS releases — expect these features to
-be version-sensitive by nature.
+macOS 15 or later. Color and Arrange depend on undocumented system behavior
+that Apple changes between releases, so expect them to be version-sensitive.

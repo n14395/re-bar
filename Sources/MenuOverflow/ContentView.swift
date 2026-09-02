@@ -261,16 +261,31 @@ struct ColorTab: View {
             Toggle("Recolor the menu bar", isOn: $mirror.enabled)
                 .toggleStyle(.switch)
 
-            Text("Draw a recolored copy over the real menu bar — same layout, your colors. Clicks pass straight through to the real bar underneath.")
+            HStack(spacing: 10) {
+                Text("Style")
+                Picker("Recolor style", selection: $mirror.recolorStyle) {
+                    Text("Full Mirror").tag(RecolorStyle.mirror)
+                    Text("Background Tint").tag(RecolorStyle.tint)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+            }
+
+            Text(mirror.recolorStyle == .mirror
+                 ? "Draw a recolored copy over the real menu bar — same layout, your colors. Clicks pass straight through to the real bar underneath."
+                 : "Lay a translucent wash of your color over the menu bar — everything stays visible through it. No permissions needed, and no recording indicator, ever.")
                 .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
 
             preview
 
-            if !mirror.permissionGranted {
-                permissionNotice
-            }
-            if !mirror.menuBarBackgroundOn {
-                backgroundNotice
+            if mirror.recolorStyle == .mirror {
+                if !mirror.permissionGranted {
+                    permissionNotice
+                }
+                if !mirror.menuBarBackgroundOn {
+                    backgroundNotice
+                }
             }
 
             themeControls
@@ -282,12 +297,14 @@ struct ColorTab: View {
 
             Divider()
 
-            Text("Recolor only — it can't move or hide items. The theme briefly reveals the real bar during Mission Control, Spaces, and full-screen. Needs Screen Recording permission to read the bar's pixels; nothing leaves your Mac.")
+            Text(mirror.recolorStyle == .mirror
+                 ? "Recolor only — it can't move or hide items. The theme briefly reveals the real bar during Mission Control, Spaces, and full-screen. Needs Screen Recording permission to read the bar's pixels; nothing leaves your Mac."
+                 : "Wash only — a translucent layer of your color over the whole bar, icons included, so contrast is softer than the Full Mirror. It can't move or hide items.")
                 .font(.caption2).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .onAppear { mirror.refreshChecks() }
+        .onAppear { if mirror.recolorStyle == .mirror { mirror.refreshChecks() } }
     }
 
     // Everything below the master switch — grayed out while the mirror is off.
@@ -323,9 +340,11 @@ struct ColorTab: View {
             HStack(spacing: 20) {
                 ColorPicker("Background", selection: $mirror.bgColor, supportsOpacity: false)
                     .onChange(of: mirror.bgColor) { _, _ in mirror.applyTheme() }
-                ColorPicker("Icons & text", selection: $mirror.fgColor, supportsOpacity: false)
-                    .onChange(of: mirror.fgColor) { _, _ in mirror.applyTheme() }
-                    .disabled(mirror.desktopTint)
+                if mirror.recolorStyle == .mirror {
+                    ColorPicker("Icons & text", selection: $mirror.fgColor, supportsOpacity: false)
+                        .onChange(of: mirror.fgColor) { _, _ in mirror.applyTheme() }
+                        .disabled(mirror.desktopTint)
+                }
                 Spacer()
                 // NB: a .borderless button here vanishes from the AX tree
                 // entirely (VoiceOver + scripting can't reach it) — keep it
@@ -357,26 +376,30 @@ struct ColorTab: View {
                     }
                 }
             }
-            HStack(spacing: 10) {
-                Text("Colored icons")
-                Picker("Colored icons", selection: $mirror.coloredIcons) {
-                    Text("Original").tag(ColoredIconMode.original)
-                    Text("Muted").tag(ColoredIconMode.muted)
-                    Text("Themed").tag(ColoredIconMode.themed)
+            // Everything below styles the captured GLYPHS — meaningless in tint
+            // mode, where macOS keeps drawing the icons itself.
+            if mirror.recolorStyle == .mirror {
+                HStack(spacing: 10) {
+                    Text("Colored icons")
+                    Picker("Colored icons", selection: $mirror.coloredIcons) {
+                        Text("Original").tag(ColoredIconMode.original)
+                        Text("Muted").tag(ColoredIconMode.muted)
+                        Text("Themed").tag(ColoredIconMode.themed)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize()
+                    .onChange(of: mirror.coloredIcons) { _, _ in mirror.applyTheme() }
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .fixedSize()
-                .onChange(of: mirror.coloredIcons) { _, _ in mirror.applyTheme() }
+                if NSScreen.screens.contains(where: { $0.auxiliaryTopLeftArea != nil }) {
+                    Toggle("Fade to black around the notch", isOn: $mirror.notchFade)
+                        .onChange(of: mirror.notchFade) { _, _ in mirror.applyTheme() }
+                }
+                Toggle("Tint icons with each desktop's wallpaper color", isOn: $mirror.desktopTint)
+                    .onChange(of: mirror.desktopTint) { _, _ in mirror.applyTheme() }
+                Toggle("Brighten faint icons (disabled/dimmed items)", isOn: $mirror.boostFaint)
+                    .onChange(of: mirror.boostFaint) { _, _ in mirror.applyTheme() }
             }
-            if NSScreen.screens.contains(where: { $0.auxiliaryTopLeftArea != nil }) {
-                Toggle("Fade to black around the notch", isOn: $mirror.notchFade)
-                    .onChange(of: mirror.notchFade) { _, _ in mirror.applyTheme() }
-            }
-            Toggle("Tint icons with each desktop's wallpaper color", isOn: $mirror.desktopTint)
-                .onChange(of: mirror.desktopTint) { _, _ in mirror.applyTheme() }
-            Toggle("Brighten faint icons (disabled/dimmed items)", isOn: $mirror.boostFaint)
-                .onChange(of: mirror.boostFaint) { _, _ in mirror.applyTheme() }
             Toggle("Show themed bar in screenshots & screen sharing", isOn: $mirror.showInScreenshots)
                 .onChange(of: mirror.showInScreenshots) { _, _ in mirror.applyTheme() }
         }
@@ -601,7 +624,14 @@ struct ColorTab: View {
         return AnyShapeStyle(mirror.bgColor)
     }
 
-    private var previewFG: Color { mirror.fgColor }
+    private var previewFG: Color {
+        guard mirror.recolorStyle == .tint else { return mirror.fgColor }
+        // Tint mode: macOS keeps drawing the glyphs itself — approximate with
+        // plain white/black picked by the background's brightness.
+        let ns = NSColor(mirror.bgColor).usingColorSpace(.sRGB) ?? .black
+        let lum = 0.2126 * ns.redComponent + 0.7152 * ns.greenComponent + 0.0722 * ns.blueComponent
+        return lum < 0.5 ? .white : Color(white: 0.1)
+    }
 }
 
 private extension SIMD3<Double> {
