@@ -492,7 +492,7 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
 // MARK: - Engine (background render loop + click-through overlay panels)
 
 private final class MirrorEngine: @unchecked Sendable {
-    private let q = DispatchQueue(label: "dev.nwf.MenuOverflow.mirror", qos: .userInteractive)
+    private let q = DispatchQueue(label: "com.n14395.re-bar.mirror", qos: .userInteractive)
     private let lock = NSLock()
 
     // shared state (lock-guarded)

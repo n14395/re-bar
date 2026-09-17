@@ -297,7 +297,7 @@ final class ArrangeController {
     private func backupStore(_ dict: [String: Any]) {
         let fm = FileManager.default
         guard let dir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("MenuOverflow", isDirectory: true) else { return }
+            .appendingPathComponent("ReBar", isDirectory: true) else { return }
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         let df = DateFormatter()
         df.locale = Locale(identifier: "en_US_POSIX")

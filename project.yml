@@ -1,16 +1,16 @@
-# XcodeGen spec — source of truth for MenuOverflow.xcodeproj.
+# XcodeGen spec — source of truth for ReBar.xcodeproj.
 # Regenerate the project any time with:  xcodegen generate
 #
 # This mirrors the SPM / Scripts/build-app.sh setup so the Xcode project and the
 # command-line build produce the same app:
-#   • same bundle id (dev.nwf.MenuOverflow) and Info.plist (used verbatim)
+#   • same bundle id (com.n14395.re-bar) and Info.plist (used verbatim)
 #   • same app icon (Resources/AppIcon.icns, referenced by CFBundleIconFile)
 #   • Apple Development signing → stable designated requirement, so macOS keeps
 #     granted permissions (Screen Recording, etc.) across rebuilds, exactly like
 #     build-app.sh. Package.swift and build-app.sh remain the CLI build path.
-name: MenuOverflow
+name: ReBar
 options:
-  bundleIdPrefix: dev.nwf
+  bundleIdPrefix: com.n14395
   createIntermediateGroups: true
   deploymentTarget:
     macOS: "15.0"
@@ -24,18 +24,18 @@ settings:
     CURRENT_PROJECT_VERSION: "2"
     SWIFT_VERSION: "6.0"          # Swift 6 language mode, matching Package.swift
 targets:
-  MenuOverflow:
+  ReBar:
     type: application
     platform: macOS
     deploymentTarget: "15.0"
     sources:
-      - path: Sources/MenuOverflow
+      - path: Sources/ReBar
       - path: Resources/AppIcon.icns
         buildPhase: resources
     settings:
       base:
-        PRODUCT_NAME: MenuOverflow
-        PRODUCT_BUNDLE_IDENTIFIER: dev.nwf.MenuOverflow
+        PRODUCT_NAME: ReBar
+        PRODUCT_BUNDLE_IDENTIFIER: com.n14395.re-bar
         # Use the hand-maintained Info.plist as-is (LSUIElement agent app, icon,
         # versions, usage strings) instead of an Xcode-generated one.
         INFOPLIST_FILE: Resources/Info.plist

@@ -1,22 +1,22 @@
 #!/bin/bash
-# MenuOverflow — build, package, sign and publish.
+# ReBar — build, package, sign and publish.
 #
-#   ./build.sh                 build the production build/MenuOverflow.app
-#   ./build.sh --dmg           …and package it into build/MenuOverflow.dmg
+#   ./build.sh                 build the production build/ReBar.app
+#   ./build.sh --dmg           …and package it into build/ReBar.dmg
 #   ./build.sh --sign          …Developer ID sign the .app and .dmg, notarize and staple
-#   ./build.sh --publish vN.N  tag, push and cut a GitHub release from build/MenuOverflow.dmg
+#   ./build.sh --publish vN.N  tag, push and cut a GitHub release from build/ReBar.dmg
 #
 # Flags combine — `./build.sh --sign --publish v1.2` signs, notarizes and releases in
-# one go. `--publish` on its own does not rebuild: it requires build/MenuOverflow.dmg to
+# one go. `--publish` on its own does not rebuild: it requires build/ReBar.dmg to
 # already exist.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-APP_NAME="MenuOverflow"
+APP_NAME="ReBar"
 BUILD_DIR="$PWD/build"
 APP_PATH="$BUILD_DIR/$APP_NAME.app"
 DMG_PATH="$BUILD_DIR/$APP_NAME.dmg"
-BUNDLE_ID="dev.nwf.MenuOverflow"
+BUNDLE_ID="com.n14395.re-bar"
 ENTITLEMENTS=""
 
 # Exported from ~/.zshrc. The literal fallback keeps the script working when it is
@@ -223,7 +223,7 @@ build_app() {
 
     rm -rf "$APP_PATH"
     mkdir -p "$APP_PATH/Contents/MacOS" "$APP_PATH/Contents/Resources"
-    cp .build/release/MenuOverflow "$APP_PATH/Contents/MacOS/MenuOverflow"
+    cp .build/release/ReBar "$APP_PATH/Contents/MacOS/ReBar"
     cp Resources/Info.plist "$APP_PATH/Contents/Info.plist"
     cp Resources/AppIcon.icns "$APP_PATH/Contents/Resources/AppIcon.icns"
 

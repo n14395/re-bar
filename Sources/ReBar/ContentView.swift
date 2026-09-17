@@ -69,7 +69,7 @@ struct ContentView: View {
             }
             .font(.callout)
 
-            Text("Closing this window keeps MenuOverflow running. With the menu bar icon hidden, launch MenuOverflow again to reopen these settings.")
+            Text("Closing this window keeps ReBar running. With the menu bar icon hidden, launch ReBar again to reopen these settings.")
                 .font(.caption2).foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -574,7 +574,7 @@ struct ColorTab: View {
                 Button("Grant Screen Recording…") { mirror.requestPermission() }
                 Button("Open Settings") { mirror.openScreenRecordingSettings() }
             }
-            Text("After granting, quit and reopen MenuOverflow.")
+            Text("After granting, quit and reopen ReBar.")
                 .font(.caption2).foregroundStyle(.tertiary)
         }
         .padding(8)

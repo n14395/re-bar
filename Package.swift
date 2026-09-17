@@ -2,9 +2,9 @@
 import PackageDescription
 
 let package = Package(
-    name: "MenuOverflow",
+    name: "ReBar",
     platforms: [.macOS(.v15)],
     targets: [
-        .executableTarget(name: "MenuOverflow")
+        .executableTarget(name: "ReBar")
     ]
 )

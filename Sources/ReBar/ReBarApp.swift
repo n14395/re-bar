@@ -46,7 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 @main
-struct MenuOverflowApp: App {
+struct ReBarApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     // Owned at app scope so the mirror's render loop and display observer survive
     // the window being closed.
@@ -54,7 +54,7 @@ struct MenuOverflowApp: App {
     @AppStorage("showMenuBarIcon") private var showMenuBarIcon = true
 
     var body: some Scene {
-        Window("MenuOverflow", id: "main") {
+        Window("ReBar", id: "main") {
             ContentView(mirror: mirror)
         }
         .windowResizability(.contentSize)
@@ -101,6 +101,6 @@ private struct MenuBarExtraMenu: View {
         }
         Toggle("Show Menu Bar Icon", isOn: $showMenuBarIcon)
         Divider()
-        Button("Quit MenuOverflow") { NSApp.terminate(nil) }
+        Button("Quit ReBar") { NSApp.terminate(nil) }
     }
 }

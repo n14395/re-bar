@@ -3,17 +3,17 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleIdentifier</key>
-	<string>dev.nwf.MenuOverflow</string>
+	<string>com.n14395.re-bar</string>
 	<key>CFBundleExecutable</key>
-	<string>MenuOverflow</string>
+	<string>ReBar</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
 	<key>CFBundleIconName</key>
 	<string>AppIcon</string>
 	<key>CFBundleName</key>
-	<string>MenuOverflow</string>
+	<string>ReBar</string>
 	<key>CFBundleDisplayName</key>
-	<string>MenuOverflow</string>
+	<string>ReBar</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -21,7 +21,7 @@
 	<key>CFBundleVersion</key>
 	<string>2</string>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>MenuOverflow uses System Events to log you out when you click “Log Out” on the Spacing tab.</string>
+	<string>ReBar uses System Events to log you out when you click “Log Out” on the Spacing tab.</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>15.0</string>
 	<key>LSUIElement</key>

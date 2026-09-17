@@ -42,7 +42,7 @@ enum SettingsTransfer {
     static func runExportPanel(mirror: MenuBarMirrorController) {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.json]
-        panel.nameFieldStringValue = "MenuOverflow Settings.json"
+        panel.nameFieldStringValue = "ReBar Settings.json"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         let export = SettingsExportV1(
             spacing: .init(spacing: MenuBarSpacing.spacing, padding: MenuBarSpacing.padding),
@@ -73,7 +73,7 @@ enum SettingsTransfer {
             // fails with a real message instead of a decoding error.
             if let head = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let v = head["version"] as? Int, v > 1 {
-                alert("Can't import", "This file was exported by a newer version of MenuOverflow (format v\(v)).")
+                alert("Can't import", "This file was exported by a newer version of ReBar (format v\(v)).")
                 return false
             }
             let settings = try JSONDecoder().decode(SettingsExportV1.self, from: data)

@@ -1,4 +1,4 @@
-# MenuOverflow
+# ReBar
 
 ![Platform](https://img.shields.io/badge/macOS-15%2B-blue)
 ![Swift](https://img.shields.io/badge/Swift-6-orange)
@@ -29,7 +29,7 @@ they are, muted, or repainted to match. Optional extras include a fade around
 the notch, per-desktop wallpaper tinting, and whether the color shows up in
 screenshots and screen sharing.
 
-MenuOverflow reads the real bar and draws a click-through overlay on top of it,
+ReBar reads the real bar and draws a click-through overlay on top of it,
 so clicks still land on the real items underneath. This needs **Screen
 Recording** permission, and macOS will show its recording indicator while the
 overlay is running. The captured pixels never leave your Mac.
@@ -48,7 +48,7 @@ macOS and can't be moved.
 
 Applying an order restarts the menu bar, so it disappears for a few seconds
 before coming back. The layout is backed up to
-`~/Library/Application Support/MenuOverflow/` before every change.
+`~/Library/Application Support/ReBar/` before every change.
 
 ### Elsewhere
 
@@ -58,7 +58,7 @@ exports and imports its settings as JSON.
 ## Install
 
 Download the latest `.dmg` from the [Releases](../../releases) page, open it,
-and drag **MenuOverflow** to Applications.
+and drag **ReBar** to Applications.
 
 If macOS blocks the app the first time you open it, right-click it and choose
 **Open**, or approve it under System Settings → Privacy & Security.
@@ -78,8 +78,8 @@ Requires full Xcode — the SwiftUI macros need the complete toolchain, not just
 the Command Line Tools.
 
 ```sh
-./build.sh                 # build/MenuOverflow.app
-./build.sh --dmg           # …and package it as build/MenuOverflow.dmg
+./build.sh                 # build/ReBar.app
+./build.sh --dmg           # …and package it as build/ReBar.dmg
 ./build.sh --sign          # …Developer ID sign it, notarize and staple
 ./build.sh --publish v1.2  # tag and cut a GitHub release from the .dmg
 ```
