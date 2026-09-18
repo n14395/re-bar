@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import CoreGraphics
 import QuartzCore
+import ScreenCaptureKit
 
 // MARK: - Route A capture (the indicator-free path)
 // Bind the SDK-obsoleted C symbol directly; it still lives in CoreGraphics at
@@ -87,6 +88,257 @@ private func menubarWindowOnscreen(_ wid: UInt32) -> Bool {
     return (w[kCGWindowIsOnscreen as String] as? Bool) ?? false
 }
 
+// MARK: - Route B capture: one-shot ScreenCaptureKit window grabs (no capsule)
+//
+// macOS 27 keeps the bar's glyphs out of every capturable window — except
+// MenuBarAgent's own scene windows, which ScreenCaptureKit can address by
+// window even though the window list reports them off-screen. Capturing one of
+// those returns the whole live bar — app menus and every system and third-party
+// status item — as glyphs on a TRANSPARENT alpha channel. That is strictly
+// better input than a composite: no background to subtract, no wallpaper
+// bleeding through the matte, and our own overlay can never leak back in
+// because the filter only ever sees that one window.
+//
+// The reason this route exists is the privacy indicator. Measured on 27.2
+// (26B5086k): compositing the bar rect lights the small screenshot dot within
+// ~0.2 s AND the wide blue "your screen is being observed" capsule after ~11 s
+// of continuous capture; an SCK *stream* (display or window) does the same.
+// Repeated one-shot SCScreenshotManager calls do NOT raise the capsule — 90 s
+// at 10 Hz (611 captures) left it dark, as did 40 s at 10 Hz and 20 s at 5 Hz.
+// So this route runs indefinitely with only the small dot, no duty cycling.
+// The composite path below stays as the fallback for anything this can't read.
+
+/// Opt-in tracing for the capture routes, off unless
+/// `defaults write com.n14395.re-bar mirror.debugLog -bool true`. Writes to
+/// ~/Library/Logs/ReBar-mirror.log; used to diagnose Space-switch behaviour,
+/// where the interesting events are a second wide and invisible from outside.
+private let mirrorDebugLog = UserDefaults.standard.bool(forKey: "mirror.debugLog")
+private let mirrorLogURL = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)
+    .first?.appendingPathComponent("Logs/ReBar-mirror.log")
+private let mirrorLogLock = NSLock()
+private func mlog(_ line: @autoclosure () -> String) {
+    guard mirrorDebugLog, let url = mirrorLogURL else { return }
+    let stamp = String(format: "%.3f ", CACurrentMediaTime())
+    let data = Data((stamp + line() + "\n").utf8)
+    mirrorLogLock.lock(); defer { mirrorLogLock.unlock() }
+    if let fh = try? FileHandle(forWritingTo: url) {
+        try? fh.seekToEnd(); try? fh.write(contentsOf: data); try? fh.close()
+    } else {
+        try? data.write(to: url)
+    }
+}
+
+/// A mutable cell a detached Task can write and the render queue can read.
+private final class LockedValue<T>: @unchecked Sendable {
+    private var stored: T
+    private let lock = NSLock()
+    init(_ initial: T) { stored = initial }
+    var value: T {
+        get { lock.lock(); defer { lock.unlock() }; return stored }
+        set { lock.lock(); stored = newValue; lock.unlock() }
+    }
+}
+
+/// One MenuBarAgent scene window, ready to capture. SCWindow isn't Sendable;
+/// the render queue is the only thing that ever touches this.
+private struct AgentWindow: @unchecked Sendable {
+    let window: SCWindow
+    let windowID: CGWindowID
+    let pxWidth: Int
+    let pxHeight: Int
+}
+
+/// Every MenuBarAgent window whose frame matches this display. They are all
+/// flagged off-screen (one per Space, only one of them is the live bar), so the
+/// enumeration must explicitly include off-screen windows.
+private func agentWindows(displayBounds: CGRect, scale: CGFloat) -> [AgentWindow] {
+    let out = LockedValue<[AgentWindow]>([])
+    let done = DispatchSemaphore(value: 0)
+    Task.detached(priority: .userInitiated) {
+        defer { done.signal() }
+        guard let content = try? await SCShareableContent.excludingDesktopWindows(
+            false, onScreenWindowsOnly: false) else { return }
+        var found: [AgentWindow] = []
+        for w in content.windows
+        where w.owningApplication?.bundleIdentifier == "com.apple.MenuBarAgent" {
+            let f = w.frame
+            guard abs(f.origin.x - displayBounds.origin.x) < 4,
+                  abs(f.origin.y - displayBounds.origin.y) < 4,
+                  abs(f.width - displayBounds.width) < 4,
+                  f.height > 8, f.height < 80 else { continue }
+            found.append(AgentWindow(window: w, windowID: w.windowID,
+                                     pxWidth: Int((f.width * scale).rounded()),
+                                     pxHeight: Int((f.height * scale).rounded())))
+        }
+        out.value = found
+    }
+    guard done.wait(timeout: .now() + 2.0) == .success else { return [] }
+    return out.value
+}
+
+/// One-shot grab of a single agent window. Deliberately NOT an SCStream: an
+/// open stream session is what raises the observation capsule, individual
+/// screenshot calls are not.
+private func captureAgentWindow(_ target: AgentWindow, timeout: Double = 0.6) -> CGImage? {
+    let out = LockedValue<CGImage?>(nil)
+    let done = DispatchSemaphore(value: 0)
+    Task.detached(priority: .userInitiated) {
+        defer { done.signal() }
+        let cfg = SCStreamConfiguration()
+        cfg.width = target.pxWidth
+        cfg.height = target.pxHeight
+        cfg.showsCursor = false
+        cfg.capturesAudio = false
+        cfg.backgroundColor = .clear
+        cfg.ignoreShadowsSingleWindow = true
+        out.value = try? await SCScreenshotManager.captureImage(
+            contentFilter: SCContentFilter(desktopIndependentWindow: target.window),
+            configuration: cfg)
+    }
+    guard done.wait(timeout: .now() + timeout) == .success else { return nil }
+    return out.value
+}
+
+/// Per-column ink of a window grab: alpha summed down each column. This is the
+/// layout signature used to tell the live Space's window from its siblings.
+private func alphaColumnProfile(_ src: [UInt8], w: Int, h: Int) -> [Double] {
+    var prof = [Double](repeating: 0, count: w)
+    src.withUnsafeBufferPointer { S in
+        for y in 0..<h {
+            for x in 0..<w { prof[x] += Double(S[(y * w + x) * 4 + 3]) }
+        }
+    }
+    return prof
+}
+
+/// The same signature recovered from a composited strip, where glyphs still
+/// have to be separated from the bar's own background: per column, how far the
+/// middle rows depart from that column's own top/bottom backdrop.
+///
+/// Deliberately UNTHRESHOLDED. An earlier version only counted departures over
+/// 40/255, which quietly made the signature depend on the wallpaper: over a
+/// light desktop the bar's white glyphs sit at low contrast, most of their
+/// pixels fell under the cut, and the correct window scored 0.66 against the
+/// bar it was actually showing. Summing the raw departure scores the right
+/// window at 0.99 on light and dark desktops alike (siblings stay ≤0.70).
+private func compositeColumnProfile(_ src: [UInt8], w: Int, h: Int) -> [Double] {
+    let band = max(4, Int((Double(h) * 0.22).rounded()))
+    var prof = [Double](repeating: 0, count: w)
+    src.withUnsafeBufferPointer { S in
+        for x in 0..<w {
+            var back = (0.0, 0.0, 0.0)
+            var n = 0.0
+            for y in 0..<band {
+                let i = (y * w + x) * 4
+                back.0 += Double(S[i]); back.1 += Double(S[i+1]); back.2 += Double(S[i+2]); n += 1
+            }
+            for y in (h - band)..<h {
+                let i = (y * w + x) * 4
+                back.0 += Double(S[i]); back.1 += Double(S[i+1]); back.2 += Double(S[i+2]); n += 1
+            }
+            let br = back.0 / n, bg = back.1 / n, bb = back.2 / n
+            var sum = 0.0
+            for y in band..<(h - band) {
+                let i = (y * w + x) * 4
+                sum += max(abs(Double(S[i]) - br), max(abs(Double(S[i+1]) - bg), abs(Double(S[i+2]) - bb)))
+            }
+            prof[x] = sum
+        }
+    }
+    return prof
+}
+
+/// How far the composite reference may sit from the agent window's own
+/// coordinates and still count as the same layout, in points.
+///
+/// Needed because CGWindowListCreateImage's composite of the bar is sometimes
+/// offset by 3 pt (6 px) from where MenuBarAgent's window draws it — the whole
+/// bar after some Space switches, or just one group of items (the third-party
+/// block, say) — and stays that way for the whole visit to that Space. It is a
+/// quirk of the window-list compositor only: framebuffer screenshots taken at
+/// the same moments show the bar exactly where the agent window puts it
+/// (27.2, 26B5086k, roughly one Space switch in three). Without the tolerance
+/// the correct window scored 0.67 against a composite of itself.
+private let agentShiftTolerancePt: CGFloat = 4
+
+/// Ink on the right half of a window grab, in opaque-pixel equivalents. The
+/// hosted status items live there, and only the live window has them.
+private func rightHalfInk(_ src: [UInt8], w: Int, h: Int) -> Double {
+    var sum = 0
+    src.withUnsafeBufferPointer { S in
+        for y in 0..<h {
+            let row = y * w
+            for x in (w / 2)..<w { sum += Int(S[(row + x) * 4 + 3]) }
+        }
+    }
+    return Double(sum) / 255.0
+}
+
+/// Block-wise, shift-tolerant cosine similarity of two column profiles: the
+/// columns are cut into blocks of `block`, each block finds its own best
+/// offset within ±`maxShift` (so groups of items that the compositor placed a
+/// few px apart still line up), and the per-block dot products and norms are
+/// pooled into one score. Also reports the most common offset, for the log.
+/// The live window scores ~0.95+ against what is actually on screen; a sibling
+/// window showing another Space's menus, or one without the hosted items,
+/// stays below ~0.8.
+private func profileMatch(_ a: [Double], _ b: [Double], block: Int, maxShift: Int) -> (score: Double, shift: Int) {
+    guard a.count == b.count, !a.isEmpty, block > 0 else { return (0, 0) }
+    let n = a.count
+    var dot = 0.0, na = 0.0, nb = 0.0
+    var shiftVotes = [Int: Int]()
+    a.withUnsafeBufferPointer { A in
+        b.withUnsafeBufferPointer { B in
+            var x0 = 0
+            while x0 < n {
+                let x1 = min(n, x0 + block)
+                var best = (score: -1.0, shift: 0, dot: 0.0, na: 0.0, nb: 0.0)
+                for s in -maxShift...maxShift {
+                    let lo = max(0, x0 + s), hi = min(n, x1 + s)      // a[i] against b[i - s]
+                    guard hi > lo else { continue }
+                    var d = 0.0, p = 0.0, q = 0.0
+                    for i in lo..<hi {
+                        let x = A[i], y = B[i - s]
+                        d += x * y; p += x * x; q += y * y
+                    }
+                    let score = (p > 0 && q > 0) ? d / (p * q).squareRoot() : 0
+                    if score > best.score { best = (score, s, d, p, q) }
+                }
+                dot += best.dot; na += best.na; nb += best.nb
+                if best.na > 0, best.nb > 0 { shiftVotes[best.shift, default: 0] += 1 }
+                x0 = x1
+            }
+        }
+    }
+    guard na > 0, nb > 0 else { return (0, 0) }
+    let shift = shiftVotes.max { $0.value < $1.value }?.key ?? 0
+    return (dot / (na * nb).squareRoot(), shift)
+}
+
+/// Per-column backdrop colors (0…1 RGB triples) read from the bar's own
+/// material window — a single-window grab, which raises no indicator at all.
+/// The window-capture route has no background of its own, so this is where the
+/// "tint icons with the desktop's color" option gets its colors.
+private func materialBackdropColumns(wid: UInt32, w: Int, h: Int) -> [Double]? {
+    guard let img = captureStrip(wid), img.width == w, img.height == h else { return nil }
+    let src = drawSource(img)
+    let band = max(4, Int((Double(h) * 0.22).rounded()))
+    let lo = band, hi = max(band + 1, h - band)
+    var cols = [Double](repeating: 0, count: w * 3)
+    src.withUnsafeBufferPointer { S in
+        for x in 0..<w {
+            var r = 0.0, g = 0.0, b = 0.0
+            for y in lo..<hi {
+                let i = (y * w + x) * 4
+                r += Double(S[i]); g += Double(S[i+1]); b += Double(S[i+2])
+            }
+            let n = Double(hi - lo) * 255.0
+            cols[x*3] = r / n; cols[x*3+1] = g / n; cols[x*3+2] = b / n
+        }
+    }
+    return cols
+}
+
 // MARK: - Private Spaces API (soft-linked; no-ops if the symbols ever change)
 // Pin the overlay onto every managed Space so it's already a member of the
 // incoming Space at commit — eliminating the ~1-frame `.canJoinAllSpaces` join
@@ -150,12 +402,13 @@ private func menuBarBackgroundOnNow() -> Bool {
 
 /// TCC preflight is unreliable — it reports false negatives after the ad-hoc dev
 /// build is re-signed and on newer macOS in general. So trust ground truth too:
-/// if we can actually capture the bar, we have access (without Screen Recording,
-/// window NAMES are hidden from CGWindowListCopyWindowInfo, so captureMenubar
-/// can't even find a "Menubar" candidate — it fails cleanly, not spuriously).
+/// window NAMES are hidden from CGWindowListCopyWindowInfo without Screen
+/// Recording, so being able to find the "Menubar" window by name IS the grant.
+/// Note this probe deliberately reads no pixels — it used to capture the bar,
+/// which lit the screenshot indicator once a second while Settings was open.
 private func screenCapturePermissionNow() -> Bool {
     CGPreflightScreenCaptureAccess()
-        || captureMenubar(displayBounds: CGDisplayBounds(CGMainDisplayID())).image != nil
+        || findMenubarWindow(displayBounds: CGDisplayBounds(CGMainDisplayID())) != nil
 }
 
 private func allManagedSpaceIDs(_ cid: Int32) -> [NSNumber] {
@@ -462,6 +715,125 @@ private func renderThemed(src: [UInt8], w: Int, h: Int, theme: MirrorTheme,
     return (outImg, Double(nonBlack) / Double(w * h))
 }
 
+/// Recolor a window-capture frame (Route B), where the glyphs arrive already
+/// separated on the alpha channel. Everything the clean-row version has to
+/// estimate — the backdrop, the matte, the glyph's own color — is exact here:
+/// alpha IS the matte and un-premultiplying by it IS the glyph color. Returns
+/// the themed image and the fraction of inked pixels (≈0 ⇒ nothing to show).
+private func renderThemedAlpha(src: [UInt8], w: Int, h: Int, theme: MirrorTheme,
+                               notchBand: NotchBandPx? = nil,
+                               backdrop: [Double]? = nil) -> (CGImage, Double)? {
+    guard w > 32, h >= 24, src.count == w * h * 4 else { return nil }
+    var out = [UInt8](repeating: 0, count: w * h * 4)
+    var inked = 0
+
+    // Background wash and notch fade: identical to the composite path — the
+    // difference between the two renderers is only where the glyphs come from.
+    let colBG: [SIMD3<Double>]? = theme.gradient
+        ? (0..<w).map { x in
+            let t = Double(x) / Double(max(1, w - 1))
+            if let m = theme.bgMid {
+                return t < 0.5 ? theme.bg + (t * 2) * (m - theme.bg)
+                               : m + ((t - 0.5) * 2) * (theme.bg2 - m)
+            }
+            return theme.bg + t * (theme.bg2 - theme.bg)
+        }
+        : nil
+    let fadeMul: [Double]? = notchBand.map { b in
+        (0..<w).map { x in
+            let d = max(b.minX - Double(x), Double(x) - b.maxX)
+            return smoothstep(d / b.fadeWidth)
+        }
+    }
+    let tintCols: [Double]? = (theme.desktopTint && backdrop?.count == w * 3) ? backdrop : nil
+
+    src.withUnsafeBufferPointer { S in
+    out.withUnsafeMutableBufferPointer { O in
+        // Pass 1 — per-column chroma evidence, same trick as the composite
+        // renderer: a column that passes through a colored fill lets the
+        // low-chroma pixels inside that fill (the dark digits in the yellow
+        // battery pill) keep their own color instead of being repainted.
+        var colChroma = [Double](repeating: 0, count: w)
+        if theme.coloredIcons == .original {
+            for y in 0..<h {
+                for x in 0..<w {
+                    let i = (y * w + x) * 4
+                    let a = Double(S[i+3]) / 255.0
+                    guard a >= 0.5 else { continue }
+                    let gr = min(1.0, Double(S[i])   / 255.0 / a)
+                    let gg = min(1.0, Double(S[i+1]) / 255.0 / a)
+                    let gb = min(1.0, Double(S[i+2]) / 255.0 / a)
+                    let chroma = max(gr, max(gg, gb)) - min(gr, min(gg, gb))
+                    if chroma > colChroma[x] { colChroma[x] = chroma }
+                }
+            }
+        }
+
+        for y in 0..<h {
+            for x in 0..<w {
+                let i = (y * w + x) * 4
+                let aRaw = Double(S[i+3]) / 255.0
+                if aRaw > 0.03 { inked += 1 }
+                var a = aRaw
+                if theme.boostFaint { a = a.squareRoot() }
+
+                var base = colBG?[x] ?? theme.bg
+                if let f = fadeMul { base *= f[x] }
+
+                var cr = theme.fg.x, cg = theme.fg.y, cb = theme.fg.z
+                if let tint = tintCols {
+                    let br = tint[x*3], bg = tint[x*3+1], bb = tint[x*3+2]
+                    if 0.2126*base.x + 0.7152*base.y + 0.0722*base.z > 0.55 {
+                        cr = 0.35*br; cg = 0.35*bg; cb = 0.35*bb
+                    } else {
+                        cr = 0.5 + 0.5*br; cg = 0.5 + 0.5*bg; cb = 0.5 + 0.5*bb
+                    }
+                }
+
+                if theme.coloredIcons != .themed, aRaw > 0.12 {
+                    let ar = max(aRaw, 0.25)
+                    let gr = min(1.0, Double(S[i])   / 255.0 / ar)
+                    let gg = min(1.0, Double(S[i+1]) / 255.0 / ar)
+                    let gb = min(1.0, Double(S[i+2]) / 255.0 / ar)
+                    let chroma = max(gr, max(gg, gb)) - min(gr, min(gg, gb))
+                    let kPix = smoothstep((chroma - 0.18) / 0.17)
+                    let edge = smoothstep((aRaw - 0.12) / 0.15)
+                    if theme.coloredIcons == .original {
+                        let kCol = smoothstep((colChroma[x] - 0.25) / 0.20)
+                        let k = max(kPix, kCol) * edge
+                        if k > 0 { cr += k * (gr - cr); cg += k * (gg - cg); cb += k * (gb - cb) }
+                    } else {
+                        let k = kPix * edge
+                        if k > 0 {
+                            let dr = base.x + 0.5 * (cr - base.x)
+                            let dg = base.y + 0.5 * (cg - base.y)
+                            let db = base.z + 0.5 * (cb - base.z)
+                            cr += k * (dr - cr); cg += k * (dg - cg); cb += k * (db - cb)
+                        }
+                    }
+                }
+
+                let or_ = base.x + a*(cr - base.x)
+                let og  = base.y + a*(cg - base.y)
+                let ob  = base.z + a*(cb - base.z)
+                O[i]   = UInt8(min(255, max(0, or_ * 255)))
+                O[i+1] = UInt8(min(255, max(0, og  * 255)))
+                O[i+2] = UInt8(min(255, max(0, ob  * 255)))
+                O[i+3] = 255
+            }
+        }
+    }}
+
+    let outImg = out.withUnsafeMutableBytes { p -> CGImage? in
+        let ctx = CGContext(data: p.baseAddress, width: w, height: h, bitsPerComponent: 8,
+                            bytesPerRow: w * 4, space: srgb,
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        return ctx.makeImage()
+    }
+    guard let outImg else { return nil }
+    return (outImg, Double(inked) / Double(w * h))
+}
+
 // MARK: - Display snapshot (captured on main, read on the render queue)
 
 /// The notch's horizontal span in points from the display's LEFT edge.
@@ -485,7 +857,23 @@ struct NotchBandPx: Sendable, Equatable {
     let fadeWidth: Double
 }
 
-struct MirrorStats: Sendable { var activeDisplays = 0 }
+struct MirrorStats: Sendable {
+    var activeDisplays = 0
+    /// True while at least one display is being read through the window-capture
+    /// route — the path that carries glyphs without the observation capsule.
+    var windowCapture = false
+}
+
+/// Which path the mirror reads the bar with. `auto` (the default) prefers the
+/// window-capture route and falls back to the composite whenever that can't
+/// produce a frame; the other two pin one path, for troubleshooting via
+/// `defaults write com.n14395.re-bar mirror.captureRoute window|composite|auto`.
+enum CaptureRoute: String, Sendable {
+    case auto, window, composite
+    static var preferred: CaptureRoute {
+        CaptureRoute(rawValue: UserDefaults.standard.string(forKey: "mirror.captureRoute") ?? "") ?? .auto
+    }
+}
 
 private final class FlippedView: NSView { override var isFlipped: Bool { true } }
 
@@ -506,6 +894,15 @@ private final class MirrorEngine: @unchecked Sendable {
     // Bumped (under `lock`) whenever the theme, display set, or Space changes —
     // any of which must defeat the damage gate below and force a full render.
     private var renderGen = 0
+    // Set under `lock` when the chosen agent windows must be picked again from
+    // scratch (display change, restart); consumed by the next tick.
+    private var agentInvalidate = true
+    // Set under `lock` when the live bar has probably moved to another of
+    // MenuBarAgent's per-Space windows (a Space switch). Unlike the flag above
+    // this keeps the current window on screen — it only forces an immediate
+    // check, so a mid-transition tick can't pick a wrong window out of a
+    // reference that isn't capturable yet.
+    private var agentRecheck = false
 
     // Damage-gate state: render-queue-only (touched exclusively inside tick(),
     // which runs solely on `q`), so no locking needed.
@@ -514,6 +911,7 @@ private final class MirrorEngine: @unchecked Sendable {
         let band: NotchBandPx?
         let w: Int
         let h: Int
+        let fromWindow: Bool
     }
     private var lastHash: [CGDirectDisplayID: UInt64] = [:]
     private var lastKey: [CGDirectDisplayID: RenderKey] = [:]
@@ -524,6 +922,87 @@ private final class MirrorEngine: @unchecked Sendable {
     // only ask "is that window still on screen?" (a one-window query).
     private var barCache: [CGDirectDisplayID: (wid: UInt32, rect: CGRect)] = [:]
     private var barCacheAge: [CGDirectDisplayID: Int] = [:]
+    // Window-capture route state, also render-queue-only: which MenuBarAgent
+    // scene window each display is read from and how it was chosen (see readBar).
+    private enum AgentPick { case ink, composite }
+    private var agentWin: [CGDirectDisplayID: AgentWindow] = [:]
+    // The display's MenuBarAgent windows, kept between resolves: their IDs are
+    // stable for the life of the agent, and re-enumerating costs ~70 ms that a
+    // Space switch can't spare.
+    private var agentPool: [CGDirectDisplayID: [AgentWindow]] = [:]
+    private var agentEnumAt: [CGDirectDisplayID: CFTimeInterval] = [:]
+    private var agentMode: [CGDirectDisplayID: AgentPick] = [:]
+    // Right-half ink the chosen window is expected to carry; a large drop means
+    // the hosted items have moved to another window.
+    private var agentInk: [CGDirectDisplayID: Double] = [:]
+    // What a hot window carries on this display, and when each window was last
+    // the hot one — together they let a re-pick stop at the first grab.
+    private var agentHotLevel: [CGDirectDisplayID: Double] = [:]
+    private var agentLastHot: [CGWindowID: CFTimeInterval] = [:]
+    // Next routine check against the real bar, and consecutive misses so far.
+    private var agentCheckAt: [CGDirectDisplayID: CFTimeInterval] = [:]
+    private var agentFails: [CGDirectDisplayID: Int] = [:]
+    // Space-switch settling: until when, and which window we were on before it.
+    private var agentSettleUntil: [CGDirectDisplayID: CFTimeInterval] = [:]
+    private var agentPrev: [CGDirectDisplayID: CGWindowID] = [:]
+    // Backoff after a failed pick (or a machine where the route can't work),
+    // consecutive failed picks, and consecutive failed grabs of the current pick.
+    private var agentRetryAt: [CGDirectDisplayID: CFTimeInterval] = [:]
+    private var agentResolveFails: [CGDirectDisplayID: Int] = [:]
+    private var agentGrabFails: [CGDirectDisplayID: Int] = [:]
+    // Per-column backdrop colors for the desktop-tint option (window route only).
+    private var tintCols: [CGDirectDisplayID: [Double]] = [:]
+    private var tintAge: [CGDirectDisplayID: Int] = [:]
+    private let route = CaptureRoute.preferred
+    /// How long after a Space switch the previous window stays suspect.
+    private let agentSettleTime: CFTimeInterval = 2.0
+    /// When, after a Space switch or a fresh pick during one, the pick is
+    /// verified against the screen: late enough for the transition and the
+    /// agent's item move to be over, early enough that a wrong bar barely shows.
+    private let agentSettleVerify: CFTimeInterval = 0.6
+    /// Routine verification cadence. Wall clock, not ticks — the adaptive
+    /// cadence must not stretch it. Each check is a single composite frame,
+    /// nowhere near the ~11 s of continuous capture that raises the capsule.
+    /// An ink-picked window has its own continuous signal, so it needs less.
+    private let agentCheckInterval: CFTimeInterval = 5
+    private let agentCheckIntervalComposite: CFTimeInterval = 3
+    /// Follow-up after a single failed check (one miss may be a blend).
+    private let agentRecheckSoon: CFTimeInterval = 0.4
+    /// Retry delays: a check that couldn't run (bar mid-transition), a pick that
+    /// found nothing convincing, and a display with no agent windows at all.
+    private let agentRetryInterval: CFTimeInterval = 0.3
+    private let agentUnavailableRetry: CFTimeInterval = 5
+    /// Ink lead that marks the live window (measured ~3–4×), and the fraction of
+    /// its ink below which the items have evidently left.
+    private let agentHotRatio = 1.5
+    private let agentInkDrop = 0.6
+    /// Below this the "hot" window has nothing on it (a hidden bar), so ink
+    /// says nothing and the layout match decides.
+    private let agentMinInk = 50.0
+    /// A window carrying this share of the known hot level is the live one —
+    /// no need to grab the rest of the pool.
+    private let agentEarlyExit = 0.75
+    /// A re-pick first grabs only this many windows (most recently hot first).
+    /// If none carries the items the move is probably still in flight, so it
+    /// waits agentTransitRetry and looks again before scanning everything.
+    private let agentQuickScan = 3
+    private let agentTransitRetry: CFTimeInterval = 0.15
+    /// Consecutive failed grabs of the current window before it is given up —
+    /// a single failure is routine in the middle of a Space transition.
+    private let agentGrabFailLimit = 3
+    /// Layout-match thresholds (block-wise, shift-tolerant cosine): a check
+    /// passes above the first; a composite-based pick needs the second and a
+    /// lead over the runner-up. Siblings measure ≤0.78 even mid-transition.
+    private let agentPassScore = 0.80
+    private let agentMatchScore = 0.85
+    private let agentLeadMargin = 0.08
+    /// Block width for the layout match, in points: one group of items.
+    private let agentBlockPt: CGFloat = 128
+    private func agentShiftPx(_ scale: CGFloat) -> Int { Int((agentShiftTolerancePt * scale).rounded()) }
+    private func agentBlockPx(_ scale: CGFloat) -> Int { max(32, Int((agentBlockPt * scale).rounded())) }
+
+    /// Ticks between desktop-tint backdrop refreshes (~2 s at 20 Hz).
+    private let tintRefreshTicks = 40
     // Adaptive cadence: ~2 s of a byte-identical bar drops the timer to ~6.7 Hz;
     // any change (or capture trouble) snaps straight back to 20 Hz.
     private var quietTicks = 0
@@ -551,14 +1030,14 @@ private final class MirrorEngine: @unchecked Sendable {
 
     func setTheme(_ t: MirrorTheme) { lock.lock(); theme = t; renderGen += 1; lock.unlock() }
     func setDisplays(_ d: [DisplaySnapshot]) {
-        lock.lock(); displays = d; renderGen += 1; lock.unlock()
+        lock.lock(); displays = d; renderGen += 1; agentInvalidate = true; lock.unlock()
         let keep = Set(d.map(\.displayID))
         DispatchQueue.main.async { MainActor.assumeIsolated { self.prunePanels(keeping: keep) } }
     }
     func snapshotStats() -> MirrorStats { lock.lock(); defer { lock.unlock() }; return stats }
 
     func start() {
-        lock.lock(); isActive = true; renderGen += 1; lock.unlock()
+        lock.lock(); isActive = true; renderGen += 1; agentInvalidate = true; lock.unlock()
         let t = DispatchSource.makeTimerSource(queue: q)
         t.schedule(deadline: .now(), repeating: .milliseconds(50))   // ~20 Hz
         t.setEventHandler { [weak self] in self?.tick() }
@@ -575,7 +1054,10 @@ private final class MirrorEngine: @unchecked Sendable {
     /// Called the moment the active Space changes: repaint with the new Space's
     /// content immediately and re-assert the overlay's front ordering for a beat.
     @MainActor func onSpaceChanged() {
-        lock.lock(); renderGen += 1; lock.unlock()
+        mlog("=== space changed ===")
+        // The live bar moves to another of MenuBarAgent's per-Space windows, so
+        // the window-capture route has to re-check its target right away.
+        lock.lock(); renderGen += 1; agentRecheck = true; lock.unlock()
         frontBoostUntil = CACurrentMediaTime() + 0.5
         for p in panels.values { pinWindowToAllSpaces(p.windowNumber) }   // catch newly-created Spaces
         q.async { [weak self] in self?.tick() }
@@ -585,17 +1067,41 @@ private final class MirrorEngine: @unchecked Sendable {
         lock.lock()
         guard isActive else { lock.unlock(); return }
         let t = theme, ds = displays, gen = renderGen
+        let dropAgents = agentInvalidate
+        let recheckAgents = agentRecheck
+        agentInvalidate = false
+        agentRecheck = false
         lock.unlock()
         guard !ds.isEmpty else { return }
+        if dropAgents {
+            agentWin.removeAll(); agentPool.removeAll(); agentInk.removeAll(); agentMode.removeAll()
+            agentCheckAt.removeAll(); agentFails.removeAll(); agentSettleUntil.removeAll()
+            agentPrev.removeAll(); agentRetryAt.removeAll(); agentEnumAt.removeAll()
+            agentHotLevel.removeAll(); agentLastHot.removeAll()
+            agentResolveFails.removeAll(); agentGrabFails.removeAll()
+        } else if recheckAgents {
+            // Space switch: the items will move to another window shortly. Show
+            // the screen until they do, verify the new pick soon after.
+            let now = CACurrentMediaTime()
+            for (did, win) in agentWin {
+                agentSettleUntil[did] = now + agentSettleTime
+                agentPrev[did] = win.windowID
+                agentCheckAt[did] = now + agentSettleVerify
+                agentFails[did] = 0
+            }
+        }
 
         var active = 0
         var anyWork = false      // false ⇔ every display took the unchanged-skip path
+        var windowRoute = false  // true ⇔ some display read the bar without the capsule
         for d in ds {
             let did = d.displayID, frame = d.appKitFrame, scale = d.scale, show = t.showInScreenshots
 
             // Resolve the bar window — from cache when it's fresh and still on
             // screen (Space switches retire the old per-Space window, which the
-            // liveness probe catches), with a periodic full re-resolve.
+            // liveness probe catches), with a periodic full re-resolve. This is
+            // metadata only: it answers "is a menu bar on screen here", which
+            // drives the hold/hide decisions, and gives the fallback its rect.
             var bar = barCache[did]
             if let c = bar, (barCacheAge[did] ?? .max) < 24, menubarWindowOnscreen(c.wid) {
                 barCacheAge[did]! += 1
@@ -605,10 +1111,10 @@ private final class MirrorEngine: @unchecked Sendable {
                 barCacheAge[did] = 0
             }
             let barExists = bar != nil
-            let cap = bar.flatMap {
-                captureBarComposite(rect: $0.rect, wid: $0.wid, belowWindow: overlayID(for: did))
-            }
-            guard let img = cap, img.width > 32, img.height >= 24 else {
+
+            // Read the bar: window route when it can be trusted, composite
+            // otherwise (see readBar).
+            guard let read = readBar(for: d, bar: bar) else {
                 lastHash[did] = nil        // whatever comes back next is a fresh start
                 barCache[did] = nil        // and the window gets re-resolved too
                 anyWork = true
@@ -620,20 +1126,37 @@ private final class MirrorEngine: @unchecked Sendable {
                 }
                 continue
             }
+            let src = read.src, w = read.w, h = read.h, fromWindow = read.fromWindow
+            if fromWindow { windowRoute = true }
 
-            // Damage gate: hash a sparse sample of the normalized bytes and skip
-            // the recolor passes + main-thread push when the bar, theme, and
-            // geometry are all unchanged. A periodic forced render backstops
-            // anything a sparse sample could alias past.
-            let w = img.width, h = img.height
             let band: NotchBandPx? = (t.notchFade && d.notch != nil)
                 ? NotchBandPx(minX: Double(d.notch!.minXPt * d.scale),
                               maxX: Double(d.notch!.maxXPt * d.scale),
                               fadeWidth: 48.0 * Double(d.scale))
                 : nil
-            let src = drawSource(img)
+
+            // A window grab has no background of its own, so the desktop-tint
+            // option reads its colors from the bar's material window instead —
+            // a single-window grab, which raises no indicator at all. Wallpaper
+            // changes slowly; refreshing it every ~2 s is plenty.
+            var backdrop: [Double]? = nil
+            if fromWindow, t.desktopTint {
+                if (tintAge[did] ?? .max) >= tintRefreshTicks || tintCols[did]?.count != w * 3 {
+                    tintCols[did] = bar.flatMap { materialBackdropColumns(wid: $0.wid, w: w, h: h) }
+                    tintAge[did] = 0
+                    lastHash[did] = nil        // fresh colors must defeat the damage gate
+                } else {
+                    tintAge[did]! += 1
+                }
+                backdrop = tintCols[did]
+            }
+
+            // Damage gate: hash a sparse sample of the normalized bytes and skip
+            // the recolor passes + main-thread push when the bar, theme, and
+            // geometry are all unchanged. A periodic forced render backstops
+            // anything a sparse sample could alias past.
             let hash = sampleHash(src)
-            let key = RenderKey(theme: t, band: band, w: w, h: h)
+            let key = RenderKey(theme: t, band: band, w: w, h: h, fromWindow: fromWindow)
             // `changed` = genuine invalidation (drives the cadence); the periodic
             // safety render is self-inflicted and must NOT reset the quiet streak,
             // or slow mode could never engage.
@@ -652,8 +1175,10 @@ private final class MirrorEngine: @unchecked Sendable {
             var box: SendableImage? = nil
             var barPt: CGFloat = 0
             var hardHidden = false
-            if let (out, nonBlack) = renderThemed(src: src, w: w, h: h, theme: t, notchBand: band),
-               nonBlack > 0.002 {
+            let rendered = fromWindow
+                ? renderThemedAlpha(src: src, w: w, h: h, theme: t, notchBand: band, backdrop: backdrop)
+                : renderThemed(src: src, w: w, h: h, theme: t, notchBand: band)
+            if let (out, ink) = rendered, ink > 0.002 {
                 box = SendableImage(image: out)
                 barPt = CGFloat(h) / d.scale
                 active += 1
@@ -670,7 +1195,7 @@ private final class MirrorEngine: @unchecked Sendable {
         }
 
         lock.lock()
-        stats = MirrorStats(activeDisplays: active)
+        stats = MirrorStats(activeDisplays: active, windowCapture: windowRoute)
         lock.unlock()
 
         // Adaptive cadence. The forced periodic render (ticksSinceRender) still
@@ -690,6 +1215,253 @@ private final class MirrorEngine: @unchecked Sendable {
             }
         }
     }
+
+    /// Read one display's menu bar for this frame.
+    ///
+    /// Prefers the window route — MenuBarAgent's own scene window, glyphs on
+    /// alpha, no observation capsule. Which of the agent's per-Space windows is
+    /// the live one is decided by INK, not by matching against the screen: the
+    /// agent hosts every third-party status item in exactly one window at a
+    /// time, the active Space's, so that window carries far more ink on its
+    /// right half than its siblings (measured ~9k vs ~2–3k opaque-pixel
+    /// equivalents; the mapping holds for the whole visit to a Space, and
+    /// repeatedly capturing every window does not disturb it). The composite of
+    /// the real bar is the fallback and an occasional sanity check only — it is
+    /// a poor judge: the window-list compositor can place whole groups of
+    /// glyphs 3 pt off from where the agent window draws them (see
+    /// agentShiftTolerancePt), and for ~0.5 s around a Space switch it shows a
+    /// blend of two bars, which is exactly when a check is most tempting.
+    ///
+    /// After a Space switch the agent moves the items to the new Space's window
+    /// a few hundred ms after the switch is announced. Until the chosen window
+    /// loses its ink the screen is the truth, so those frames come from the
+    /// composite; the moment it drops, the pool is scanned and the new hot
+    /// window adopted and painted straight away.
+    private func readBar(for d: DisplaySnapshot,
+                         bar: (wid: UInt32, rect: CGRect)?)
+                         -> (src: [UInt8], w: Int, h: Int, fromWindow: Bool)? {
+        let did = d.displayID
+        let overlay = overlayID(for: did)
+        func composite() -> (src: [UInt8], w: Int, h: Int, fromWindow: Bool)? {
+            guard let b = bar,
+                  let img = captureBarComposite(rect: b.rect, wid: b.wid, belowWindow: overlay),
+                  img.width > 32, img.height >= 24 else { return nil }
+            return (drawSource(img), img.width, img.height, false)
+        }
+        func painted(_ img: CGImage) -> (src: [UInt8], w: Int, h: Int, fromWindow: Bool) {
+            (drawSource(img), img.width, img.height, true)
+        }
+        guard route != .composite, let b = bar else { return composite() }
+        let now = CACurrentMediaTime()
+
+        if agentWin[did] == nil {
+            guard now >= (agentRetryAt[did] ?? 0) else { return composite() }
+            if let pick = resolveAgentWindow(for: d, bar: b, reference: nil) { return painted(pick.image) }
+            return composite()
+        }
+        guard let cand = agentWin[did], let img = captureAgentWindow(cand),
+              img.width > 32, img.height >= 24 else {
+            let fails = (agentGrabFails[did] ?? 0) + 1
+            agentGrabFails[did] = fails
+            mlog("grab failed wid=\(agentWin[did]?.windowID ?? 0) (\(fails))")
+            if fails >= agentGrabFailLimit { agentWin[did] = nil }
+            return composite()
+        }
+        agentGrabFails[did] = 0
+        let src = drawSource(img)
+        let w = img.width, h = img.height
+        let ink = rightHalfInk(src, w: w, h: h)
+
+        // The hosted items have left this window: it is no longer the live bar.
+        // (Only meaningful for an ink-picked window; a bar with no third-party
+        // items has nothing to lose.)
+        if agentMode[did] == .ink {
+            let level = agentInk[did] ?? 0
+            if ink < agentInkDrop * level {
+                mlog("ink drop wid=\(cand.windowID) \(Int(ink)) < \(Int(level)) -> re-pick")
+                agentPrev[did] = cand.windowID         // scan the window we are leaving last
+                if let pick = resolveAgentWindow(for: d, bar: b, reference: nil) { return painted(pick.image) }
+                return composite()
+            }
+            // Track the level a drop is judged against: follows increases at
+            // once, decays back from a transient (an open menu's highlight).
+            agentInk[did] = max(ink, level * 0.98)
+        }
+
+        // Settling after a Space switch and still on the window we had before
+        // it: the agent may not have moved the items yet, so show the screen.
+        // (No composite mid-transition → keep the window rather than go blank.)
+        let settling = now < (agentSettleUntil[did] ?? 0)
+        if settling, cand.windowID == agentPrev[did], now < (agentCheckAt[did] ?? 0),
+           let screen = composite() {
+            return screen
+        }
+
+        // Routine sanity check against the real bar (plus the early one that
+        // ends a settle). One miss is not evidence — the composite may be a
+        // mid-transition blend — two in a row are.
+        if now >= (agentCheckAt[did] ?? 0) {
+            guard let ref = captureBarComposite(rect: b.rect, wid: b.wid, belowWindow: overlay),
+                  ref.width == w, ref.height == h else {
+                agentCheckAt[did] = now + agentRetryInterval
+                return (src, w, h, true)
+            }
+            let refSrc = drawSource(ref)
+            let refProfile = compositeColumnProfile(refSrc, w: w, h: h)
+            let match = profileMatch(alphaColumnProfile(src, w: w, h: h), refProfile,
+                                     block: agentBlockPx(d.scale), maxShift: agentShiftPx(d.scale))
+            let fails = match.score >= agentPassScore ? 0 : (agentFails[did] ?? 0) + 1
+            agentFails[did] = fails
+            mlog("check wid=\(cand.windowID) score=\(String(format: "%.3f", match.score)) shift=\(match.shift) mode=\(agentMode[did].map { "\($0)" } ?? "?") fails=\(fails)")
+            if fails == 0 {
+                agentSettleUntil[did] = 0
+                agentCheckAt[did] = now + (agentMode[did] == .ink ? agentCheckInterval
+                                                                  : agentCheckIntervalComposite)
+                return (src, w, h, true)
+            }
+            if fails < 2 {
+                agentCheckAt[did] = now + agentRecheckSoon
+                return settling ? (refSrc, w, h, false) : (src, w, h, true)
+            }
+            if let pick = resolveAgentWindow(for: d, bar: b, reference: refProfile) { return painted(pick.image) }
+            return (refSrc, w, h, false)
+        }
+        return (src, w, h, true)
+    }
+
+    /// Pick this display's live agent window, and return its first frame so
+    /// the caller can paint it without a second grab.
+    ///
+    /// Ink first: the window carrying the hosted status items is the live one
+    /// (agentHotRatio ahead of the runner-up). Two windows that both stand out
+    /// mean the items are mid-move; the destination is whichever one we were
+    /// not showing. If no window stands out — a bar with no third-party items —
+    /// each candidate's glyph layout is matched against the composite reference
+    /// instead (block-wise, shift-tolerant). Re-enumerates the pool when nothing
+    /// convinces: the agent creates and retires these windows as Spaces come
+    /// and go. On failure the pick is cleared and retried after a short delay.
+    private func resolveAgentWindow(for d: DisplaySnapshot,
+                                    bar: (wid: UInt32, rect: CGRect),
+                                    reference: [Double]?) -> (window: AgentWindow, image: CGImage)? {
+        let did = d.displayID
+        let now = CACurrentMediaTime()
+        struct Scanned { let window: AgentWindow; let image: CGImage; let src: [UInt8]; let ink: Double }
+
+        // Scan order: most recently hot first (two Spaces the user flips between
+        // then cost one grab each), the window we are leaving last. With a known
+        // hot level the scan stops at the first window that clearly carries the
+        // items instead of grabbing all eleven.
+        let prev = agentPrev[did] ?? agentWin[did]?.windowID
+        let hotLevel = agentHotLevel[did] ?? 0
+        func ordered(_ pool: [AgentWindow]) -> [AgentWindow] {
+            pool.sorted { a, b in
+                if a.windowID == prev { return false }
+                if b.windowID == prev { return true }
+                return (agentLastHot[a.windowID] ?? 0) > (agentLastHot[b.windowID] ?? 0)
+            }
+        }
+        func scan(_ pool: [AgentWindow]) -> [Scanned] {
+            var out: [Scanned] = []
+            for c in ordered(pool) {
+                guard let img = captureAgentWindow(c), img.width > 32, img.height >= 24 else { continue }
+                let src = drawSource(img)
+                let s = Scanned(window: c, image: img, src: src,
+                                ink: rightHalfInk(src, w: img.width, h: img.height))
+                out.append(s)
+                if hotLevel > 0, c.windowID != prev, s.ink >= agentEarlyExit * hotLevel { break }
+            }
+            return out.sorted { $0.ink > $1.ink }
+        }
+        func adopt(_ s: Scanned, _ mode: AgentPick) -> (window: AgentWindow, image: CGImage) {
+            agentWin[did] = s.window
+            agentInk[did] = s.ink
+            agentMode[did] = mode
+            agentFails[did] = 0
+            agentResolveFails[did] = 0
+            agentGrabFails[did] = 0
+            if mode == .ink { agentHotLevel[did] = s.ink; agentLastHot[s.window.windowID] = now }
+            let settling = now < (agentSettleUntil[did] ?? 0)
+            agentCheckAt[did] = now + (settling ? agentSettleVerify
+                                       : mode == .ink ? agentCheckInterval : agentCheckIntervalComposite)
+            mlog("adopt wid=\(s.window.windowID) mode=\(mode) ink=\(Int(s.ink))")
+            return (s.window, s.image)
+        }
+
+        var refProfile = reference
+        func decide(_ scanned: [Scanned]) -> (window: AgentWindow, image: CGImage)? {
+            guard let top = scanned.first else { return nil }
+            if top.ink >= agentMinInk {
+                let second = scanned.count > 1 ? scanned[1] : nil
+                guard let second else { return adopt(top, .ink) }
+                if top.ink >= agentHotRatio * second.ink { return adopt(top, .ink) }
+                if scanned.count > 2, second.ink >= agentHotRatio * scanned[2].ink, let prev {
+                    if top.window.windowID == prev { return adopt(second, .ink) }
+                    if second.window.windowID == prev { return adopt(top, .ink) }
+                }
+            }
+            // No ink signal: match layouts against the real bar.
+            if refProfile == nil,
+               let ref = captureBarComposite(rect: bar.rect, wid: bar.wid, belowWindow: overlayID(for: did)) {
+                refProfile = compositeColumnProfile(drawSource(ref), w: ref.width, h: ref.height)
+            }
+            guard let refProfile else { return nil }
+            var best: (s: Scanned, score: Double)? = nil
+            var runnerUp = 0.0
+            for s in scanned {
+                let profile = alphaColumnProfile(s.src, w: s.image.width, h: s.image.height)
+                guard profile.count == refProfile.count else { continue }
+                let score = profileMatch(profile, refProfile, block: agentBlockPx(d.scale),
+                                         maxShift: agentShiftPx(d.scale)).score
+                if best == nil || score > best!.score { runnerUp = best?.score ?? 0; best = (s, score) }
+                else if score > runnerUp { runnerUp = score }
+            }
+            if let best, best.score >= agentMatchScore, best.score - runnerUp >= agentLeadMargin {
+                return adopt(best.s, .composite)
+            }
+            mlog("no convincing window: ink \(Int(top.ink))/\(Int(scanned.count > 1 ? scanned[1].ink : 0)), best match \(String(format: "%.3f", best?.score ?? 0)) vs \(String(format: "%.3f", runnerUp))")
+            return nil
+        }
+
+        var pool = agentPool[did] ?? []
+        var enumerated = false
+        if pool.isEmpty {
+            pool = agentWindows(displayBounds: d.cgBounds, scale: d.scale)
+            agentPool[did] = pool
+            agentEnumAt[did] = now
+            enumerated = true
+            mlog("enumerated \(pool.count) agent windows")
+        }
+        let streak = agentResolveFails[did] ?? 0
+        // Quick tier: the most recently hot windows first. If none of them
+        // carries the items on the first try, the move is probably in flight —
+        // a moment's wait beats grabbing all eleven.
+        if hotLevel > 0, streak == 0, !enumerated, pool.count > agentQuickScan {
+            let quick = scan(Array(ordered(pool).prefix(agentQuickScan)))
+            if let top = quick.first, top.window.windowID != prev, top.ink >= agentEarlyExit * hotLevel {
+                return adopt(top, .ink)
+            }
+            mlog("quick scan: no hot window (best \(Int(quick.first?.ink ?? 0)) of \(Int(hotLevel))) -> retry")
+            agentResolveFails[did] = 1
+            agentWin[did] = nil
+            agentRetryAt[did] = now + agentTransitRetry
+            return nil
+        }
+        if let pick = decide(scan(pool)) { return pick }
+        // Still nothing. The pool may be stale (Spaces come and go); once the
+        // miss has repeated, look again — but not more than once a second.
+        if !enumerated, streak >= 1, now - (agentEnumAt[did] ?? 0) >= 1.0 {
+            pool = agentWindows(displayBounds: d.cgBounds, scale: d.scale)
+            agentPool[did] = pool
+            agentEnumAt[did] = now
+            mlog("re-enumerated \(pool.count) agent windows")
+            if let pick = decide(scan(pool)) { return pick }
+        }
+        agentResolveFails[did] = streak + 1
+        agentWin[did] = nil
+        agentRetryAt[did] = now + (pool.isEmpty ? agentUnavailableRetry : agentRetryInterval)
+        return nil
+    }
+
 
     /// Damage-gate skip path: keep the visibility state machine fed without
     /// pushing a frame — lastGoodTime must not go stale during long static
@@ -1283,7 +2055,11 @@ final class MenuBarMirrorController {
 
     func refreshChecks() {
         permissionGranted = screenCapturePermissionNow()
-        menuBarBackgroundOn = menuBarBackgroundOnNow()
+        // "Show menu bar background" only matters to the composite route, which
+        // has to separate glyphs from the bar's own backdrop. The window route
+        // gets glyphs on alpha straight from MenuBarAgent, so a transparent bar
+        // is fine there — don't nag about a setting that no longer applies.
+        menuBarBackgroundOn = stats.windowCapture ? true : menuBarBackgroundOnNow()
     }
 
     func openMenuBarSettings() {

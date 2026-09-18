@@ -297,9 +297,7 @@ struct ColorTab: View {
 
             Divider()
 
-            Text(mirror.recolorStyle == .mirror
-                 ? "Recolor only — it can't move or hide items. The theme briefly reveals the real bar during Mission Control, Spaces, and full-screen. Needs Screen Recording permission to read the bar's pixels; nothing leaves your Mac."
-                 : "Wash only — a translucent layer of your color over the whole bar, icons included, so contrast is softer than the Full Mirror. It can't move or hide items.")
+            Text(mirrorCaption)
                 .font(.caption2).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
         }
         .padding(8)
@@ -564,6 +562,21 @@ struct ColorTab: View {
     private var statusLine: String {
         let n = mirror.stats.activeDisplays
         return "Active on \(n) display\(n == 1 ? "" : "s")"
+    }
+
+    /// The footnote under the Color controls. In Full Mirror it also says which
+    /// recording indicator to expect, because that differs by capture path:
+    /// reading the menu bar's own window shows only the small screenshot dot,
+    /// while the fallback — compositing the screen behind the bar — also raises
+    /// the wide “screen is being observed” badge after ten seconds or so.
+    private var mirrorCaption: String {
+        guard mirror.recolorStyle == .mirror else {
+            return "Wash only — a translucent layer of your color over the whole bar, icons included, so contrast is softer than the Full Mirror. It can't move or hide items."
+        }
+        let base = "Recolor only — it can't move or hide items. The theme briefly reveals the real bar during Mission Control, Spaces, and full-screen. Needs Screen Recording permission to read the bar; nothing leaves your Mac."
+        return mirror.stats.windowCapture
+            ? base + " It reads the menu bar's own window, so macOS shows the small screenshot dot but not the “screen is being observed” badge."
+            : base
     }
 
     private var permissionNotice: some View {
