@@ -14,6 +14,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // automatic termination reaps the windowless process — and the themed
         // bar with it.
         ProcessInfo.processInfo.disableAutomaticTermination("menu-bar mirror runs in the background")
+        #if SPARKLE
+        SparkleUpdater.start()
+        #endif
 
         // A login-item start should be silent: the window is created normally
         // (so reopen/openWindow plumbing works), then immediately closed.
@@ -99,6 +102,9 @@ private struct MenuBarExtraMenu: View {
             openWindow(id: "main")
             NSApp.activate()
         }
+        #if SPARKLE
+        SparkleCheckForUpdatesButton()
+        #endif
         Toggle("Show Menu Bar Icon", isOn: $showMenuBarIcon)
         Divider()
         Button("Quit ReBar") { NSApp.terminate(nil) }
