@@ -7,7 +7,7 @@
 A macOS utility for people whose menu bar is full. Tighten the spacing between
 items, recolor the bar, and put the items in the order you want.
 
-<!-- TODO: add a screenshot here, e.g. docs/screenshot.png -->
+![A Forest-themed menu bar, with the ReBar window that made it below](docs/01-themed-menu-bar.png)
 
 ## Features
 
@@ -20,6 +20,8 @@ macOS reads the spacing once per app, at launch, so a change applies to each
 app the next time it starts. The **Log Out…** button applies it everywhere at
 once.
 
+![The Spacing tab with the Packed preset applied — 0 pt spacing, 0 pt padding — above the tightened right end of the bar](docs/03-spacing-tab.png)
+
 ### Color
 
 Recolor the menu bar with solid colors or 2- and 3-stop gradients, with
@@ -29,10 +31,17 @@ they are, muted, or repainted to match. Optional extras include a fade around
 the notch, per-desktop wallpaper tinting, and whether the color shows up in
 screenshots and screen sharing.
 
+![The Color tab: twenty-four built-in themes, each swatch drawn in its own colors](docs/02-color-tab.png)
+
 ReBar reads the real bar and draws a click-through overlay on top of it,
-so clicks still land on the real items underneath. This needs **Screen
-Recording** permission, and macOS will show its recording indicator while the
-overlay is running. The captured pixels never leave your Mac.
+so clicks still land on the real items underneath. When the bar is hidden —
+by a full-screen app, or by the "Automatically hide and show the menu bar"
+setting — the overlay steps aside too, and comes back the moment the bar does,
+hover-reveals included. It reads the menu bar's own
+window rather than the screen, one screenshot at a time, so macOS lights only
+the small screenshot dot and not the wide "your screen is being observed"
+capsule that a continuous capture raises. This still needs **Screen Recording**
+permission. The captured pixels never leave your Mac.
 
 ### Arrange
 
@@ -45,6 +54,8 @@ macOS and can't be moved.
 - **Show inactive system items** reveals items that are movable but currently
   hidden, such as Siri and the camera indicator.
 - **Clean Up…** removes stale entries left behind by uninstalled apps.
+
+![The Arrange tab listing menu bar items, including apps that are not running and movable system items](docs/04-arrange-tab.png)
 
 Applying an order restarts the menu bar, so it disappears for a few seconds
 before coming back. The layout is backed up to

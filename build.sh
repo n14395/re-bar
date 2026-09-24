@@ -4,12 +4,19 @@
 #   ./build.sh                 build the production build/ReBar.app
 #   ./build.sh --dmg           …and package it into build/ReBar.dmg
 #   ./build.sh --sign          …Developer ID sign the .app and .dmg, notarize and staple
+#   ./build.sh --version N.N   set the app's version to N.N (committed) before building
 #   ./build.sh --publish vN.N  tag, push and cut a GitHub release from build/ReBar.dmg
 #   ./build.sh --sparkle       …with the Sparkle updater built in (combine with any of the above)
 #
-# Flags combine — `./build.sh --sign --publish v1.2` signs, notarizes and releases in
-# one go. `--publish` on its own does not rebuild: it requires build/ReBar.dmg to
-# already exist.
+# Flags combine — `./build.sh --sign --publish v1.2` sets the version to 1.2, commits
+# that, builds, signs, notarizes and releases in one go. `--publish` on its own does
+# not rebuild: it requires build/ReBar.dmg to already exist, and given no version it
+# releases the version the app inside that .dmg reports. The version lives in the
+# project (set_version knows where for this repo); --version and a building --publish
+# write it there and commit just that, so the tag, the appcast and the next App Store
+# archive all say the same number. After the release exists --publish also regenerates
+# this app's Cask in the Homebrew tap (HOMEBREW_TAP_DIR, default ~/build/homebrew-tap),
+# commits and pushes it, so `brew upgrade` picks the version up.
 #
 # The default build is the App Store build and never contains Sparkle. `--sparkle`
 # is for direct-download releases: it embeds the updater, adds "Check for Updates…"
@@ -42,16 +49,24 @@ usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; }
 WANT_DMG=0
 WANT_SIGN=0
 WANT_SPARKLE=0
+WANT_PUBLISH=0
 PUBLISH_VERSION=""
+BUILD_VERSION=""
+VERSION_NUM=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dmg)     WANT_DMG=1 ;;
         --sign)    WANT_SIGN=1 ;;
         --sparkle) WANT_SPARKLE=1 ;;
+        --version)
+            [[ $# -ge 2 ]] || die "--version needs a version argument, e.g. --version 1.2"
+            BUILD_VERSION="$2"; shift ;;
+        --version=*) BUILD_VERSION="${1#*=}" ;;
         --publish)
-            [[ $# -ge 2 ]] || die "--publish needs a version argument, e.g. --publish v1.2"
-            PUBLISH_VERSION="$2"; shift ;;
-        --publish=*) PUBLISH_VERSION="${1#*=}" ;;
+            WANT_PUBLISH=1
+            # The version is optional: bare --publish releases what the app reports.
+            if [[ $# -ge 2 && "$2" != -* ]]; then PUBLISH_VERSION="$2"; shift; fi ;;
+        --publish=*) WANT_PUBLISH=1; PUBLISH_VERSION="${1#*=}" ;;
         -h|--help) usage; exit 0 ;;
         *) die "unknown flag: $1 (try --help)" ;;
     esac
@@ -59,11 +74,29 @@ while [[ $# -gt 0 ]]; do
 done
 
 # vN.N or vN.N.N — anything else is a typo we would rather catch before tagging.
+# --version takes the same shape, with or without the v.
 if [[ -n "$PUBLISH_VERSION" ]]; then
     [[ "$PUBLISH_VERSION" =~ ^v[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] \
         || die "--publish needs a version like v1.2 or v1.2.3 (got: '$PUBLISH_VERSION')"
     VERSION_NUM="${PUBLISH_VERSION#v}"
 fi
+if [[ -n "$BUILD_VERSION" ]]; then
+    BUILD_VERSION="${BUILD_VERSION#v}"
+    [[ "$BUILD_VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] \
+        || die "--version needs a version like 1.2 or 1.2.3 (got: '$BUILD_VERSION')"
+fi
+
+# A build happens unless --publish is the only thing asked for. A build that goes
+# straight to --publish vN.N is the vN.N build, so it sets the version first.
+BUILDING=1
+if [[ $WANT_PUBLISH -eq 1 && $WANT_SIGN -eq 0 && $WANT_DMG -eq 0 ]]; then BUILDING=0; fi
+if [[ $BUILDING -eq 0 && -n "$BUILD_VERSION" ]]; then
+    die "--version sets the version for a build, and --publish alone does not build — add --sign or --dmg"
+fi
+if [[ -n "$BUILD_VERSION" && -n "$PUBLISH_VERSION" && "$BUILD_VERSION" != "$VERSION_NUM" ]]; then
+    die "--version $BUILD_VERSION and --publish $PUBLISH_VERSION disagree"
+fi
+if [[ $BUILDING -eq 1 && -n "$PUBLISH_VERSION" ]]; then BUILD_VERSION="$VERSION_NUM"; fi
 
 # Full Xcode, not the bare Command Line Tools: xcodebuild refuses to run under
 # CLT, and even SwiftPM needs Xcode's toolchain for the SwiftUI macro plugins.
@@ -224,9 +257,122 @@ publish() {
     cp -f "$DMG_PATH" "$versioned"
     echo "    $versioned"
 
+    # The branch first, so the tag never points at a commit GitHub has not seen
+    # (the version bump is the usual one), and so a rejected push stops
+    # everything before a tag exists.
+    git push origin HEAD
     git tag -a "$PUBLISH_VERSION" -m "Release $PUBLISH_VERSION"
     git push origin "$PUBLISH_VERSION"
     gh release create "$PUBLISH_VERSION" "$versioned" --verify-tag --generate-notes
+}
+
+# After the GitHub release exists: regenerate this app's Cask in the Homebrew tap
+# from the release just cut, commit it and push, so `brew upgrade` sees the new
+# version. The tap's own bin/update-cask does the work — download, checksum,
+# inspect the .app, write the Cask, commit, push — this only has to find it. The
+# Cask token is the GitHub repository name; a first release needs the repo to
+# have a GitHub description (gh repo edit -d '…'), which becomes the Cask's desc.
+HOMEBREW_TAP_DIR="${HOMEBREW_TAP_DIR:-$HOME/build/homebrew-tap}"
+
+# Runs before publish() so a missing or unpushable tap is caught before anything
+# touches git. A missing .dmg is left for publish() to report.
+check_homebrew_tap() {
+    [[ -f "$DMG_PATH" ]] || return 0
+    command -v gh >/dev/null 2>&1 || die "the GitHub CLI (gh) is not installed"
+    git remote get-url origin >/dev/null 2>&1 \
+        || die "this repository has no 'origin' remote — cannot work out its GitHub name"
+    [[ -x "$HOMEBREW_TAP_DIR/bin/update-cask" ]] \
+        || die "Homebrew tap not found at $HOMEBREW_TAP_DIR — clone github.com/n14395/homebrew-tap there, or set HOMEBREW_TAP_DIR"
+    # The tap itself must be the clone — not merely sit inside some enclosing
+    # repository — or update-cask --push would commit into the wrong place.
+    [[ "$(git -C "$HOMEBREW_TAP_DIR" rev-parse --show-toplevel 2>/dev/null)" == "$(cd "$HOMEBREW_TAP_DIR" && pwd -P)" ]] \
+        && git -C "$HOMEBREW_TAP_DIR" remote get-url origin >/dev/null 2>&1 \
+        || die "$HOMEBREW_TAP_DIR is not a git clone with an 'origin' remote — the Cask could not be pushed"
+    local token; token="$(gh repo view --json name --jq .name)"
+    [[ -f "$HOMEBREW_TAP_DIR/Casks/$token.rb" ]] \
+        || [[ -n "$(gh repo view --json description --jq .description)" ]] \
+        || die "first release of $token: give the GitHub repo a description (gh repo edit -d '…') — it becomes the Cask's desc"
+}
+
+publish_cask() {
+    step "Updating the Homebrew tap"
+    "$HOMEBREW_TAP_DIR/bin/update-cask" "$(gh repo view --json name --jq .name)" "$PUBLISH_VERSION" --push
+}
+
+# The version lives in the project — set_version() below knows where for this
+# repo — and a release must agree with it. --version N.N, or a build that goes
+# straight to --publish vN.N, writes N.N there and commits just that change, so
+# the tag, the appcast and the next App Store archive all carry one number.
+bump_version() {
+    [[ -n "$BUILD_VERSION" ]] || return 0
+    step "Setting the version to $BUILD_VERSION"
+    git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+        || die "$PWD is not inside a git repository — cannot commit the version bump"
+    if [[ -n "$(git status --porcelain -- "${VERSION_FILES[@]}")" ]]; then
+        die "uncommitted changes in: ${VERSION_FILES[*]} — commit or stash them first, so the version bump is a clean commit"
+    fi
+    set_version "$BUILD_VERSION"
+    if [[ -z "$(git status --porcelain -- "${VERSION_FILES[@]}")" ]]; then
+        echo "    already $BUILD_VERSION — nothing to commit"
+        return 0
+    fi
+    git add -- "${VERSION_FILES[@]}"
+    git commit -q -m "Bump version to $BUILD_VERSION" -- "${VERSION_FILES[@]}"
+    echo "    committed \"Bump version to $BUILD_VERSION\": ${VERSION_FILES[*]}"
+}
+
+# After build_app: the bundle must report the version just set, or set_version()
+# edited the wrong thing and the release would carry the old number.
+check_version() {
+    [[ -n "$BUILD_VERSION" ]] || return 0
+    local built
+    built="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+        "$APP_PATH/Contents/Info.plist" 2>/dev/null || true)"
+    [[ "$built" == "$BUILD_VERSION" ]] \
+        || die "the build reports version '${built:-?}' after set_version $BUILD_VERSION — set_version() is editing the wrong file"
+}
+
+# Look inside build/AppName.dmg — the artifact --publish releases, which need
+# not match whatever build/AppName.app currently holds. Prints
+# "sparkle=<0|1> version=<CFBundleShortVersionString>".
+inspect_dmg() {
+    local mnt="$BUILD_DIR/.dmg-mount" has=0 ver out
+    mkdir -p "$mnt"
+    out="$(hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "$mnt" "$DMG_PATH" 2>&1)" \
+        || die "could not mount $DMG_PATH: $out"
+    [[ -d "$mnt/$APP_NAME.app/Contents/Frameworks/Sparkle.framework" ]] && has=1
+    ver="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+        "$mnt/$APP_NAME.app/Contents/Info.plist" 2>/dev/null || true)"
+    hdiutil detach "$mnt" -quiet || hdiutil detach "$mnt" -force -quiet || true
+    rmdir "$mnt" 2>/dev/null || true
+    echo "sparkle=$has version=$ver"
+}
+
+# Runs before publish() so a wrong artifact is caught before anything touches
+# git. With no version on --publish, the version is the one the app reports;
+# with one, they must agree — it is what the tag and the appcast will say. A
+# Sparkle release must actually contain Sparkle, and a Sparkle build must not
+# slip out without its appcast.
+check_dmg() {
+    [[ -f "$DMG_PATH" ]] || return 0
+    local info has ver
+    info="$(inspect_dmg)"
+    has="${info#sparkle=}"; has="${has%% *}"
+    ver="${info##*version=}"
+    if [[ -z "$PUBLISH_VERSION" ]]; then
+        [[ "$ver" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] \
+            || die "the app inside $DMG_PATH reports version '$ver', which cannot be a vN.N tag — pass one to --publish"
+        PUBLISH_VERSION="v$ver"; VERSION_NUM="$ver"
+    elif [[ "$ver" != "$VERSION_NUM" ]]; then
+        die "the app inside $DMG_PATH is version $ver but you are publishing $PUBLISH_VERSION — build it again with --sign --publish $PUBLISH_VERSION, which sets the version first"
+    fi
+    if [[ $WANT_SPARKLE -eq 1 ]]; then
+        [[ "$has" == "1" ]] \
+            || die "$DMG_PATH was built without --sparkle — rebuild with ./build.sh --sparkle --sign (or --dmg) first"
+    else
+        [[ "$has" == "0" ]] \
+            || die "$DMG_PATH contains Sparkle — publish it with --sparkle so the appcast is uploaded too"
+    fi
 }
 
 # --sparkle: ship the Sparkle updater for direct-download releases. Sparkle must
@@ -394,43 +540,6 @@ embed_sparkle() {
     fi
 }
 
-# Look inside build/AppName.dmg — the artifact --publish releases, which need
-# not match whatever build/AppName.app currently holds. Prints
-# "sparkle=<0|1> version=<CFBundleShortVersionString>".
-inspect_dmg() {
-    local mnt="$BUILD_DIR/.dmg-mount" has=0 ver out
-    mkdir -p "$mnt"
-    out="$(hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "$mnt" "$DMG_PATH" 2>&1)" \
-        || die "could not mount $DMG_PATH: $out"
-    [[ -d "$mnt/$APP_NAME.app/Contents/Frameworks/Sparkle.framework" ]] && has=1
-    ver="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
-        "$mnt/$APP_NAME.app/Contents/Info.plist" 2>/dev/null || true)"
-    hdiutil detach "$mnt" -quiet || hdiutil detach "$mnt" -force -quiet || true
-    rmdir "$mnt" 2>/dev/null || true
-    echo "sparkle=$has version=$ver"
-}
-
-# Runs before publish() so a wrong artifact is caught before anything touches
-# git: a Sparkle release must actually contain Sparkle and carry the version
-# being tagged (that is what the appcast will advertise), and a Sparkle build
-# must not slip out without its appcast.
-check_sparkle_dmg() {
-    [[ -f "$DMG_PATH" ]] || return 0
-    local info has ver
-    info="$(inspect_dmg)"
-    has="${info#sparkle=}"; has="${has%% *}"
-    ver="${info##*version=}"
-    if [[ $WANT_SPARKLE -eq 1 ]]; then
-        [[ "$has" == "1" ]] \
-            || die "$DMG_PATH was built without --sparkle — rebuild with ./build.sh --sparkle --sign (or --dmg) first"
-        [[ "$ver" == "$VERSION_NUM" ]] \
-            || die "the app inside $DMG_PATH is version $ver but you are publishing $PUBLISH_VERSION — the appcast would advertise the wrong version; bump the marketing version and rebuild"
-    else
-        [[ "$has" == "0" ]] \
-            || die "$DMG_PATH contains Sparkle — publish it with --sparkle so the appcast is uploaded too"
-    fi
-}
-
 # After the GitHub release exists: sign the versioned .dmg with the EdDSA key,
 # write a one-item appcast.xml for it and attach it to the release, where
 # SPARKLE_FEED_URL (…/releases/latest/download/appcast.xml) resolves to it.
@@ -465,26 +574,43 @@ build_app() {
     echo "    $APP_PATH"
 }
 
+# Where this project keeps its version: the checked-in Info.plist the bundle is
+# assembled from, mirrored into project.yml so the Xcode project xcodegen makes
+# for the IDE agrees. perl rather than PlistBuddy, which rewrites the whole file
+# in its own formatting and turns a one-line bump into a noisy diff.
+VERSION_FILES=(Resources/Info.plist project.yml)
+set_version() {
+    perl -0pi -e "s/(<key>CFBundleShortVersionString<\/key>\s*<string>)[^<]*/\${1}$1/" Resources/Info.plist
+    sed -i '' -E "s/^([[:space:]]*MARKETING_VERSION: )\"[0-9.]+\"/\1\"$1\"/" project.yml
+}
+
 mkdir -p "$BUILD_DIR"
+bump_version
 fetch_sparkle
 
-if [[ $WANT_SIGN -eq 1 ]]; then
+# One production build: the bespoke build_app, then what every variant shares.
+build() {
     build_app
+    check_version
     embed_sparkle
+}
+
+if [[ $WANT_SIGN -eq 1 ]]; then
+    build
     sign_and_notarize
 elif [[ $WANT_DMG -eq 1 ]]; then
-    build_app
-    embed_sparkle
+    build
     make_dmg
-elif [[ -z "$PUBLISH_VERSION" ]]; then
-    build_app
-    embed_sparkle
+elif [[ $WANT_PUBLISH -eq 0 ]]; then
+    build
 fi
 
-if [[ -n "$PUBLISH_VERSION" ]]; then
-    check_sparkle_dmg
+if [[ $WANT_PUBLISH -eq 1 ]]; then
+    check_dmg
+    check_homebrew_tap
     publish
     publish_appcast
+    publish_cask
 fi
 
 exit 0

@@ -223,21 +223,48 @@ struct ColorTab: View {
                              to bg2: SIMD3<Double>? = nil, fg: SIMD3<Double>) -> ThemeSpec {
         ThemeSpec(bg: bg, bgMid: mid, bg2: bg2 ?? bg, gradient: bg2 != nil, fg: fg)
     }
-    // Each mode offers two 3-color gradients, one 2-color gradient, and one solid.
-    // Dark leads with Forest, Light leads with Blush (each the first tile in its
-    // appearance-filtered set, and Forest the overall default). Forest + Midnight
-    // are 3-color with a pure-black middle to disguise the notch / Espresso
+    // Twelve built-ins per appearance. The first four of each are the originals:
+    // two 3-color gradients, one 2-color gradient, and one solid — Dark leads
+    // with Forest, Light with Blush (each the first tile in its appearance-
+    // filtered set, and Forest the overall default). Forest + Midnight are
+    // 3-color with a pure-black middle to disguise the notch / Espresso
     // (2-color) / Ink (solid). Light: Blush + Sky (3-color) / Latte (2-color) /
     // Paper (solid).
+    //
+    // The remaining eight per appearance are all gradients in the soft, muted
+    // two-tone style of Zen Browser's theme swatches (rose→mint, coral→olive,
+    // chartreuse→amber, teal→mint, lavender→slate): dusky, low-saturation
+    // versions for Dark, pale washes for Light. All dark ones sit first so the
+    // unfiltered grid reads dark rows then light rows.
     private let themePresets = [
+        // Dark — originals
         ThemePreset(name: "Forest", spec: Self.spec(.init(0.0719, 0.2690, 0.1674), mid: .init(0, 0, 0), to: .init(0.0459, 0.3504, 0.3752), fg: .init(0.85, 0.95, 0.85))),
         ThemePreset(name: "Midnight", spec: Self.spec(.init(0.16, 0.18, 0.34), mid: .init(0, 0, 0), to: .init(0.44, 0.20, 0.60), fg: .init(0.95, 0.95, 0.97))),
         ThemePreset(name: "Espresso", spec: Self.spec(.init(0.14, 0.09, 0.06), to: .init(0.45, 0.24, 0.12), fg: .init(0.98, 0.90, 0.75))),
         ThemePreset(name: "Ink", spec: Self.spec(.init(0, 0, 0), fg: .init(1, 1, 1))),
+        // Dark — Zen-style gradients
+        ThemePreset(name: "Rosewood", spec: Self.spec(.init(0.24, 0.12, 0.20), mid: .init(0.36, 0.20, 0.26), to: .init(0.46, 0.26, 0.30), fg: .init(0.98, 0.90, 0.92))),
+        ThemePreset(name: "Terracotta", spec: Self.spec(.init(0.30, 0.12, 0.12), to: .init(0.26, 0.30, 0.14), fg: .init(0.98, 0.92, 0.86))),
+        ThemePreset(name: "Bronze", spec: Self.spec(.init(0.22, 0.24, 0.08), to: .init(0.42, 0.28, 0.10), fg: .init(0.98, 0.94, 0.82))),
+        ThemePreset(name: "Lagoon", spec: Self.spec(.init(0.04, 0.22, 0.28), to: .init(0.10, 0.34, 0.28), fg: .init(0.86, 0.98, 0.94))),
+        ThemePreset(name: "Twilight", spec: Self.spec(.init(0.16, 0.14, 0.30), mid: .init(0.26, 0.22, 0.38), to: .init(0.20, 0.26, 0.40), fg: .init(0.94, 0.94, 0.98))),
+        ThemePreset(name: "Ember", spec: Self.spec(.init(0.16, 0.06, 0.08), to: .init(0.50, 0.22, 0.08), fg: .init(1.0, 0.92, 0.82))),
+        ThemePreset(name: "Harbor", spec: Self.spec(.init(0.06, 0.10, 0.22), to: .init(0.12, 0.30, 0.38), fg: .init(0.90, 0.96, 1.0))),
+        ThemePreset(name: "Moss", spec: Self.spec(.init(0.10, 0.18, 0.10), to: .init(0.32, 0.30, 0.14), fg: .init(0.94, 0.96, 0.86))),
+        // Light — originals
         ThemePreset(name: "Blush", spec: Self.spec(.init(0.99, 0.84, 0.90), mid: .init(0.92, 0.86, 0.98), to: .init(1.0, 0.93, 0.80), fg: .init(0.35, 0.12, 0.20))),
         ThemePreset(name: "Sky", spec: Self.spec(.init(0.78, 0.88, 0.98), mid: .init(0.84, 0.80, 0.98), to: .init(0.98, 0.83, 0.90), fg: .init(0.09, 0.20, 0.36))),
         ThemePreset(name: "Latte", spec: Self.spec(.init(0.96, 0.92, 0.85), to: .init(0.80, 0.64, 0.45), fg: .init(0.30, 0.20, 0.12))),
         ThemePreset(name: "Paper", spec: Self.spec(.init(0.97, 0.96, 0.94), fg: .init(0.13, 0.13, 0.14))),
+        // Light — Zen-style gradients
+        ThemePreset(name: "Petal", spec: Self.spec(.init(0.98, 0.80, 0.86), mid: .init(0.99, 0.88, 0.80), to: .init(0.80, 0.92, 0.82), fg: .init(0.38, 0.16, 0.24))),
+        ThemePreset(name: "Coral", spec: Self.spec(.init(0.98, 0.78, 0.74), to: .init(0.84, 0.88, 0.64), fg: .init(0.40, 0.16, 0.14))),
+        ThemePreset(name: "Meadow", spec: Self.spec(.init(0.84, 0.92, 0.60), to: .init(0.98, 0.82, 0.60), fg: .init(0.28, 0.30, 0.08))),
+        ThemePreset(name: "Aqua", spec: Self.spec(.init(0.66, 0.90, 0.94), to: .init(0.72, 0.94, 0.78), fg: .init(0.06, 0.28, 0.32))),
+        ThemePreset(name: "Lilac", spec: Self.spec(.init(0.82, 0.78, 0.94), to: .init(0.74, 0.80, 0.92), fg: .init(0.24, 0.20, 0.40))),
+        ThemePreset(name: "Peach", spec: Self.spec(.init(0.99, 0.86, 0.76), to: .init(0.98, 0.94, 0.72), fg: .init(0.42, 0.22, 0.10))),
+        ThemePreset(name: "Seafoam", spec: Self.spec(.init(0.80, 0.94, 0.88), to: .init(0.78, 0.88, 0.98), fg: .init(0.08, 0.28, 0.30))),
+        ThemePreset(name: "Sand", spec: Self.spec(.init(0.97, 0.92, 0.82), to: .init(0.84, 0.90, 0.78), fg: .init(0.30, 0.26, 0.14))),
     ]
     private var gridColumns: [GridItem] {
         Array(repeating: GridItem(.flexible(), spacing: 8), count: 4)
@@ -261,31 +288,16 @@ struct ColorTab: View {
             Toggle("Recolor the menu bar", isOn: $mirror.enabled)
                 .toggleStyle(.switch)
 
-            HStack(spacing: 10) {
-                Text("Style")
-                Picker("Recolor style", selection: $mirror.recolorStyle) {
-                    Text("Full Mirror").tag(RecolorStyle.mirror)
-                    Text("Background Tint").tag(RecolorStyle.tint)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .fixedSize()
-            }
-
-            Text(mirror.recolorStyle == .mirror
-                 ? "Draw a recolored copy over the real menu bar — same layout, your colors. Clicks pass straight through to the real bar underneath."
-                 : "Lay a translucent wash of your color over the menu bar — everything stays visible through it. No permissions needed, and no recording indicator, ever.")
+            Text("Draw a recolored copy over the real menu bar — same layout, your colors. Clicks pass straight through to the real bar underneath.")
                 .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
 
             preview
 
-            if mirror.recolorStyle == .mirror {
-                if !mirror.permissionGranted {
-                    permissionNotice
-                }
-                if !mirror.menuBarBackgroundOn {
-                    backgroundNotice
-                }
+            if !mirror.permissionGranted {
+                permissionNotice
+            }
+            if !mirror.menuBarBackgroundOn {
+                backgroundNotice
             }
 
             themeControls
@@ -302,7 +314,7 @@ struct ColorTab: View {
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .onAppear { if mirror.recolorStyle == .mirror { mirror.refreshChecks() } }
+        .onAppear { mirror.refreshChecks() }
     }
 
     // Everything below the master switch — grayed out while the mirror is off.
@@ -338,11 +350,9 @@ struct ColorTab: View {
             HStack(spacing: 20) {
                 ColorPicker("Background", selection: $mirror.bgColor, supportsOpacity: false)
                     .onChange(of: mirror.bgColor) { _, _ in mirror.applyTheme() }
-                if mirror.recolorStyle == .mirror {
-                    ColorPicker("Icons & text", selection: $mirror.fgColor, supportsOpacity: false)
-                        .onChange(of: mirror.fgColor) { _, _ in mirror.applyTheme() }
-                        .disabled(mirror.desktopTint)
-                }
+                ColorPicker("Icons & text", selection: $mirror.fgColor, supportsOpacity: false)
+                    .onChange(of: mirror.fgColor) { _, _ in mirror.applyTheme() }
+                    .disabled(mirror.desktopTint)
                 Spacer()
                 // NB: a .borderless button here vanishes from the AX tree
                 // entirely (VoiceOver + scripting can't reach it) — keep it
@@ -374,30 +384,27 @@ struct ColorTab: View {
                     }
                 }
             }
-            // Everything below styles the captured GLYPHS — meaningless in tint
-            // mode, where macOS keeps drawing the icons itself.
-            if mirror.recolorStyle == .mirror {
-                HStack(spacing: 10) {
-                    Text("Colored icons")
-                    Picker("Colored icons", selection: $mirror.coloredIcons) {
-                        Text("Original").tag(ColoredIconMode.original)
-                        Text("Muted").tag(ColoredIconMode.muted)
-                        Text("Themed").tag(ColoredIconMode.themed)
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .fixedSize()
-                    .onChange(of: mirror.coloredIcons) { _, _ in mirror.applyTheme() }
+            // Everything below styles the captured glyphs.
+            HStack(spacing: 10) {
+                Text("Colored icons")
+                Picker("Colored icons", selection: $mirror.coloredIcons) {
+                    Text("Original").tag(ColoredIconMode.original)
+                    Text("Muted").tag(ColoredIconMode.muted)
+                    Text("Themed").tag(ColoredIconMode.themed)
                 }
-                if NSScreen.screens.contains(where: { $0.auxiliaryTopLeftArea != nil }) {
-                    Toggle("Fade to black around the notch", isOn: $mirror.notchFade)
-                        .onChange(of: mirror.notchFade) { _, _ in mirror.applyTheme() }
-                }
-                Toggle("Tint icons with each desktop's wallpaper color", isOn: $mirror.desktopTint)
-                    .onChange(of: mirror.desktopTint) { _, _ in mirror.applyTheme() }
-                Toggle("Brighten faint icons (disabled/dimmed items)", isOn: $mirror.boostFaint)
-                    .onChange(of: mirror.boostFaint) { _, _ in mirror.applyTheme() }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .onChange(of: mirror.coloredIcons) { _, _ in mirror.applyTheme() }
             }
+            if NSScreen.screens.contains(where: { $0.auxiliaryTopLeftArea != nil }) {
+                Toggle("Fade to black around the notch", isOn: $mirror.notchFade)
+                    .onChange(of: mirror.notchFade) { _, _ in mirror.applyTheme() }
+            }
+            Toggle("Tint icons with each desktop's wallpaper color", isOn: $mirror.desktopTint)
+                .onChange(of: mirror.desktopTint) { _, _ in mirror.applyTheme() }
+            Toggle("Brighten faint icons (disabled/dimmed items)", isOn: $mirror.boostFaint)
+                .onChange(of: mirror.boostFaint) { _, _ in mirror.applyTheme() }
             Toggle("Show themed bar in screenshots & screen sharing", isOn: $mirror.showInScreenshots)
                 .onChange(of: mirror.showInScreenshots) { _, _ in mirror.applyTheme() }
         }
@@ -560,20 +567,19 @@ struct ColorTab: View {
     }
 
     private var statusLine: String {
-        let n = mirror.stats.activeDisplays
-        return "Active on \(n) display\(n == 1 ? "" : "s")"
+        let n = mirror.stats.activeDisplays, h = mirror.stats.hiddenDisplays
+        var line = "Active on \(n) display\(n == 1 ? "" : "s")"
+        if h > 0 { line += " · menu bar hidden on \(h)" }
+        return line
     }
 
-    /// The footnote under the Color controls. In Full Mirror it also says which
-    /// recording indicator to expect, because that differs by capture path:
-    /// reading the menu bar's own window shows only the small screenshot dot,
-    /// while the fallback — compositing the screen behind the bar — also raises
-    /// the wide “screen is being observed” badge after ten seconds or so.
+    /// The footnote under the Color controls. It also says which recording
+    /// indicator to expect, because that differs by capture path: reading the
+    /// menu bar's own window shows only the small screenshot dot, while the
+    /// fallback — compositing the screen behind the bar — also raises the wide
+    /// “screen is being observed” badge after ten seconds or so.
     private var mirrorCaption: String {
-        guard mirror.recolorStyle == .mirror else {
-            return "Wash only — a translucent layer of your color over the whole bar, icons included, so contrast is softer than the Full Mirror. It can't move or hide items."
-        }
-        let base = "Recolor only — it can't move or hide items. The theme briefly reveals the real bar during Mission Control, Spaces, and full-screen. Needs Screen Recording permission to read the bar; nothing leaves your Mac."
+        let base = "Recolor only — it can't move or hide items. The theme briefly reveals the real bar during Mission Control and Space switches, and stands down while a full-screen app or the auto-hide setting hides the bar. Needs Screen Recording permission to read the bar; nothing leaves your Mac."
         return mirror.stats.windowCapture
             ? base + " It reads the menu bar's own window, so macOS shows the small screenshot dot but not the “screen is being observed” badge."
             : base
@@ -637,14 +643,7 @@ struct ColorTab: View {
         return AnyShapeStyle(mirror.bgColor)
     }
 
-    private var previewFG: Color {
-        guard mirror.recolorStyle == .tint else { return mirror.fgColor }
-        // Tint mode: macOS keeps drawing the glyphs itself — approximate with
-        // plain white/black picked by the background's brightness.
-        let ns = NSColor(mirror.bgColor).usingColorSpace(.sRGB) ?? .black
-        let lum = 0.2126 * ns.redComponent + 0.7152 * ns.greenComponent + 0.0722 * ns.blueComponent
-        return lum < 0.5 ? .white : Color(white: 0.1)
-    }
+    private var previewFG: Color { mirror.fgColor }
 }
 
 private extension SIMD3<Double> {

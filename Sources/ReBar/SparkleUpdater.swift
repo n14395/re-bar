@@ -47,6 +47,22 @@ final class SparkleUpdater: ObservableObject {
         item.target = controller
         return item
     }
+
+    /// "Check for Updates…" as a push button, for a settings pane built in AppKit.
+    /// Disabled while a check is already running, like the menu item.
+    func makeButton() -> NSButton {
+        let button = UpdaterButton(title: "Check for Updates…", target: controller,
+                                   action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)))
+        button.subscription = $canCheckForUpdates.sink { [weak button] enabled in
+            MainActor.assumeIsolated { button?.isEnabled = enabled }
+        }
+        return button
+    }
+
+    /// An NSButton that owns the subscription keeping its enabled state current.
+    private final class UpdaterButton: NSButton {
+        var subscription: AnyCancellable?
+    }
 }
 
 /// "Check for Updates…" directly under "About <App>" in the application menu.

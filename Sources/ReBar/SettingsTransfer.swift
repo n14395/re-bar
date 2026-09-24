@@ -18,7 +18,6 @@ struct SettingsExportV1: Codable {
         var keepColors: Bool? = nil      // legacy boolean (exports from the toggle era)
         var coloredIcons: String? = nil  // ColoredIconMode raw value; absent in older exports
         var notchFade: Bool? = nil       // absent in older exports
-        var style: String? = nil         // RecolorStyle raw value; absent → mirror
         var gradient: Bool
         var bg: SIMD3<Double>
         var bgMid: SIMD3<Double>?   // present only for 3-color gradients

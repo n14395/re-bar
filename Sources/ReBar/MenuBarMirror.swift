@@ -358,6 +358,35 @@ private let slsMainConnectionID = slsSym(["SLSMainConnectionID", "CGSMainConnect
 private let slsCopyManagedDisplaySpaces = slsSym(["SLSCopyManagedDisplaySpaces"], as: FnCopySpaces.self)
 private let slsAddWindowsToSpaces = slsSym(["CGSAddWindowsToSpaces", "SLSAddWindowsToSpaces"], as: FnAddWindows.self)
 
+// MARK: - Is the menu bar shown right now? (private SkyLight query)
+// A full-screen app and the "Automatically hide and show the menu bar" setting
+// both slide the bar off the top of its display, but neither leaves a public
+// trace the render loop can use: the Window Server "Menubar" window keeps
+// reporting on-screen at its usual place in a full-screen Space, and
+// MenuBarAgent's scene window still carries every glyph — so the mirror would
+// happily paint a themed bar over the full-screen app. WindowServer knows,
+// though: SLSIsMenuBarVisibleOnSpace answers for the Space a display is showing
+// and tracks the LIVE state, so a hover-reveal of a hidden bar reads as shown
+// again (verified on 27.2 in all three states: desktop, full-screen hidden and
+// revealed, auto-hide hidden). ~20 µs per call — cheap enough for every tick.
+private typealias FnCurrentSpace = @convention(c) (Int32, CFString) -> UInt64
+private typealias FnMenuBarVisible = @convention(c) (Int32, UInt64) -> Bool
+private let slsManagedDisplayGetCurrentSpace = slsSym(["SLSManagedDisplayGetCurrentSpace"], as: FnCurrentSpace.self)
+private let slsIsMenuBarVisibleOnSpace = slsSym(["SLSIsMenuBarVisibleOnSpace"], as: FnMenuBarVisible.self)
+
+/// Whether the menu bar is currently shown on the display with this UUID —
+/// false while a full-screen app or the auto-hide setting has it tucked away.
+/// `nil` when the query isn't available (unknown; callers should assume shown).
+private func menuBarVisible(displayUUID: String) -> Bool? {
+    guard !displayUUID.isEmpty, let mainConn = slsMainConnectionID,
+          let currentSpace = slsManagedDisplayGetCurrentSpace,
+          let visibleOnSpace = slsIsMenuBarVisibleOnSpace else { return nil }
+    let cid = mainConn()
+    let sid = currentSpace(cid, displayUUID as CFString)
+    guard sid != 0 else { return nil }
+    return visibleOnSpace(cid, sid)
+}
+
 // MARK: - "Show menu bar background" detection (capture-based)
 // The setting isn't a readable preference — it's private WindowServer state. But
 // its effect is unmistakable in what we capture: with the background OFF the menu
@@ -844,6 +873,7 @@ struct NotchSpan: Sendable, Equatable {
 
 struct DisplaySnapshot: Sendable {
     let displayID: CGDirectDisplayID
+    let uuid: String           // CGDisplayCreateUUIDFromDisplayID; "" if unavailable
     let cgBounds: CGRect       // CoreGraphics global (top-left origin)
     let appKitFrame: CGRect    // NSScreen.frame (bottom-left origin)
     let scale: CGFloat
@@ -859,6 +889,9 @@ struct NotchBandPx: Sendable, Equatable {
 
 struct MirrorStats: Sendable {
     var activeDisplays = 0
+    /// Displays whose menu bar is currently hidden (full-screen app or the
+    /// auto-hide setting) — the overlay stands down there until it returns.
+    var hiddenDisplays = 0
     /// True while at least one display is being read through the window-capture
     /// route — the path that carries glyphs without the observation capsule.
     var windowCapture = false
@@ -917,6 +950,8 @@ private final class MirrorEngine: @unchecked Sendable {
     private var lastKey: [CGDirectDisplayID: RenderKey] = [:]
     private var ticksSinceRender: [CGDirectDisplayID: Int] = [:]
     private var lastGen: [CGDirectDisplayID: Int] = [:]
+    // Displays whose bar was hidden (full-screen / auto-hide) on the last tick.
+    private var barHidden: Set<CGDirectDisplayID> = []
     // Cached Menubar-window resolution per display: the full window-list walk is
     // the priciest part of an idle tick, so between periodic re-resolutions we
     // only ask "is that window still on screen?" (a one-window query).
@@ -1092,10 +1127,31 @@ private final class MirrorEngine: @unchecked Sendable {
         }
 
         var active = 0
+        var hidden = 0
         var anyWork = false      // false ⇔ every display took the unchanged-skip path
         var windowRoute = false  // true ⇔ some display read the bar without the capsule
         for d in ds {
             let did = d.displayID, frame = d.appKitFrame, scale = d.scale, show = t.showInScreenshots
+
+            // The bar is hidden here — a full-screen app, or the auto-hide setting
+            // — so there is nothing to mirror: take the overlay down at once and
+            // skip the capture. (The capture would otherwise succeed: the agent
+            // window keeps its glyphs while off the top of the screen.) The
+            // moment the bar is back, including a hover-reveal, render in full.
+            if menuBarVisible(displayUUID: d.uuid) == false {
+                if barHidden.insert(did).inserted {
+                    mlog("bar hidden on display \(did) -> overlay down")
+                    anyWork = true
+                }
+                hidden += 1
+                lastHash[did] = nil        // first frame after the reveal is a full render
+                DispatchQueue.main.async { MainActor.assumeIsolated { self.hideForHiddenBar(did: did) } }
+                continue
+            }
+            if barHidden.remove(did) != nil {
+                mlog("bar shown on display \(did) -> overlay back")
+                anyWork = true
+            }
 
             // Resolve the bar window — from cache when it's fresh and still on
             // screen (Space switches retire the old per-Space window, which the
@@ -1195,7 +1251,7 @@ private final class MirrorEngine: @unchecked Sendable {
         }
 
         lock.lock()
-        stats = MirrorStats(activeDisplays: active, windowCapture: windowRoute)
+        stats = MirrorStats(activeDisplays: active, hiddenDisplays: hidden, windowCapture: windowRoute)
         lock.unlock()
 
         // Adaptive cadence. The forced periodic render (ticksSinceRender) still
@@ -1474,6 +1530,14 @@ private final class MirrorEngine: @unchecked Sendable {
         if now < frontBoostUntil { panels[did]?.orderFrontRegardless() }
     }
 
+    /// The bar is hidden on this display (full-screen / auto-hide): no grace
+    /// period — WindowServer said so, there is no capture hiccup to wait out.
+    @MainActor private func hideForHiddenBar(did: CGDirectDisplayID) {
+        panels[did]?.orderOut(nil)
+        lastGoodTime[did] = nil
+        blackSince[did] = nil
+    }
+
     @MainActor private func applyFrame(did: CGDirectDisplayID, image: SendableImage?, hardHidden: Bool,
                                        barExists: Bool, barPt: CGFloat, frame: CGRect, scale: CGFloat, show: Bool) {
         lock.lock(); let active = isActive; lock.unlock()
@@ -1557,139 +1621,6 @@ private final class MirrorEngine: @unchecked Sendable {
     }
 }
 
-// MARK: - Background tint (permission-free path)
-
-/// How the bar gets recolored. `.mirror` captures the bar and redraws all of
-/// it — icons included — which needs Screen Recording and shows the system's
-/// recording indicators. `.tint` lays a translucent wash of the theme color
-/// over the bar: everything stays visible through it, uniformly tinted, and
-/// nothing ever reads the screen — no permission, no indicator.
-enum RecolorStyle: String, CaseIterable, Sendable {
-    case mirror, tint
-}
-
-/// One click-through panel per display laid OVER the bar as a translucent
-/// wash of the theme background — icons and menus stay legible through it,
-/// uniformly tinted.
-///
-/// A behind-the-bar panel (the Ice/Thaw placement, one level below the bar so
-/// only the backdrop picks up the color) was tried first and is measurably
-/// dead on macOS 27 beta 26A5421a: the bar's material composites as an opaque
-/// raster with its wallpaper blur baked in, and windows beneath it are
-/// occlusion-culled outright — a panel at ANY lower level contributes nothing
-/// (verified with saturated-color probes at levels 3–24; only level ≥ the
-/// bar's own shows up at all). The wash above the bar is the one capture-free
-/// recolor lever left on this build.
-@MainActor
-final class TintOverlay {
-    /// Strong enough to read as the theme color, weak enough that glyph
-    /// contrast survives underneath.
-    private static let washAlpha = 0.45
-
-    private var panels: [CGDirectDisplayID: NSPanel] = [:]
-    private var theme: MirrorTheme?
-    private(set) var running = false
-
-    var activeDisplays: Int { running ? panels.count : 0 }
-
-    func apply(_ theme: MirrorTheme) {
-        self.theme = theme
-        if running { layout() }
-    }
-
-    func start() {
-        running = true
-        layout()
-    }
-
-    func stop() {
-        running = false
-        for p in panels.values { p.orderOut(nil) }
-        panels.removeAll()
-    }
-
-    /// Screens changed (resolution, arrangement, plug/unplug) — rebuild frames.
-    func refreshFrames() {
-        if running { layout() }
-    }
-
-    func onSpaceChanged() {
-        guard running else { return }
-        for p in panels.values {
-            pinWindowToAllSpaces(p.windowNumber)   // catch newly-created Spaces
-            p.orderFrontRegardless()
-        }
-    }
-
-    private func layout() {
-        guard let theme else { return }
-        var kept: Set<CGDirectDisplayID> = []
-        for screen in NSScreen.screens {
-            guard let num = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
-            else { continue }
-            let did = CGDirectDisplayID(num.uint32Value)
-            // Bar height: what visibleFrame excludes at the top, with the
-            // notch-adjacent safe area as a floor (it under-reports by 1 pt
-            // here: aux 38 vs bar 39). A zero height (menu bar set to
-            // auto-hide) gets no panel — a bare colored stripe would just
-            // sit on the desktop.
-            let h = max(screen.auxiliaryTopLeftArea?.height ?? 0,
-                        screen.frame.maxY - screen.visibleFrame.maxY)
-            guard h > 1, h < 80 else { continue }
-            kept.insert(did)
-            let panel = panels[did] ?? makePanel(did: did)
-            panel.sharingType = theme.showInScreenshots ? .readOnly : .none
-            panel.setFrame(NSRect(x: screen.frame.minX, y: screen.frame.maxY - h,
-                                  width: screen.frame.width, height: h), display: true)
-            if let layer = panel.contentView?.layer as? CAGradientLayer {
-                // A single-stop gradient layer renders nothing — duplicate the
-                // color for the solid case.
-                var stops = [theme.bg]
-                if theme.gradient {
-                    if let m = theme.bgMid { stops.append(m) }
-                    stops.append(theme.bg2)
-                } else {
-                    stops.append(theme.bg)
-                }
-                layer.colors = stops.map {
-                    CGColor(srgbRed: $0.x, green: $0.y, blue: $0.z, alpha: Self.washAlpha)
-                }
-            }
-            panel.orderFrontRegardless()
-        }
-        for (did, panel) in panels where !kept.contains(did) {
-            panel.orderOut(nil); panels[did] = nil
-        }
-    }
-
-    private func makePanel(did: CGDirectDisplayID) -> NSPanel {
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 100, height: 24),
-                            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = false
-        panel.ignoresMouseEvents = true            // clicks land on the real bar
-        panel.isMovable = false
-        panel.isReleasedWhenClosed = false
-        panel.isExcludedFromWindowsMenu = true
-        // Over the bar (same level as the mirror overlay — the two modes are
-        // never active together). See the class note for why "one level below"
-        // does not work on this OS.
-        panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.statusWindow)))
-        panel.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle]
-        let v = NSView(frame: .zero)
-        let gradient = CAGradientLayer()
-        gradient.startPoint = CGPoint(x: 0, y: 0.5)
-        gradient.endPoint = CGPoint(x: 1, y: 0.5)
-        v.layer = gradient           // layer-hosting: the layer tracks the view's bounds
-        v.wantsLayer = true
-        panel.contentView = v
-        panels[did] = panel
-        pinWindowToAllSpaces(panel.windowNumber)   // eager per-Space membership (no join lag)
-        return panel
-    }
-}
-
 // MARK: - Controller (SwiftUI-facing state)
 
 // Persisted so a relaunch — in particular a silent login-item start — restores
@@ -1702,7 +1633,6 @@ private let kTint = "mirror.desktopTint", kBoost = "mirror.boostFaint"
 private let kShots = "mirror.showInScreenshots"
 private let kColoredIcons = "mirror.coloredIcons"
 private let kNotchFade = "mirror.notchFade"
-private let kStyle = "mirror.style"
 private let kKeepColors = "mirror.keepColors"   // legacy boolean this replaced
 private let kFollow = "mirror.followAppearance"
 private let kThemeLight = "mirror.themeLight", kThemeDark = "mirror.themeDark"
@@ -1727,14 +1657,6 @@ final class MenuBarMirrorController {
             guard enabled != oldValue else { return }
             UserDefaults.standard.set(enabled, forKey: kEnabled)
             enabled ? start() : stop()
-        }
-    }
-    /// Which recolor path runs while `enabled` — flipping it live swaps engines.
-    var recolorStyle = RecolorStyle(rawValue: UserDefaults.standard.string(forKey: kStyle) ?? "") ?? .mirror {
-        didSet {
-            guard recolorStyle != oldValue else { return }
-            UserDefaults.standard.set(recolorStyle.rawValue, forKey: kStyle)
-            if enabled { stop(); start() }
         }
     }
     var bgColor = savedColor(kBG, or: Color(red: 0.10, green: 0.11, blue: 0.16))
@@ -1796,7 +1718,6 @@ final class MenuBarMirrorController {
     private(set) var stats = MirrorStats()
 
     private let engine = MirrorEngine()
-    private let tintOverlay = TintOverlay()
     private var statsTimer: Timer?
     private var screenObserver: NSObjectProtocol?
     private var spaceObserver: NSObjectProtocol?
@@ -1809,7 +1730,6 @@ final class MenuBarMirrorController {
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.engine.onSpaceChanged()
-                self?.tintOverlay.onSpaceChanged()
             }
         }
         screenObserver = NotificationCenter.default.addObserver(
@@ -1850,21 +1770,21 @@ final class MenuBarMirrorController {
                 if abs((lo + hi) / 2 - s.frame.width / 2) > 2 { lo = l.maxX; hi = r.minX }
                 if hi > lo { notch = NotchSpan(minXPt: lo, maxXPt: hi) }
             }
-            return DisplaySnapshot(displayID: did, cgBounds: CGDisplayBounds(did),
+            let uuid = CGDisplayCreateUUIDFromDisplayID(did).map {
+                CFUUIDCreateString(nil, $0.takeRetainedValue()) as String
+            } ?? ""
+            return DisplaySnapshot(displayID: did, uuid: uuid, cgBounds: CGDisplayBounds(did),
                                    appKitFrame: s.frame, scale: s.backingScaleFactor, notch: notch)
         }
     }
 
     private func pushDisplays() {
         engine.setDisplays(snapshotDisplays())
-        tintOverlay.refreshFrames()
     }
 
-    /// Hand the resolved theme to both paths — each is a no-op while inactive.
+    /// Hand the resolved theme to the engine — a no-op while it is inactive.
     private func pushTheme() {
-        let t = currentTheme()
-        engine.setTheme(t)
-        tintOverlay.apply(t)
+        engine.setTheme(currentTheme())
     }
 
     private func currentTheme() -> MirrorTheme {
@@ -1993,7 +1913,6 @@ final class MenuBarMirrorController {
               boostFaint: boostFaint, showInScreenshots: showInScreenshots,
               coloredIcons: coloredIcons.rawValue,
               notchFade: notchFade,
-              style: recolorStyle.rawValue,
               gradient: gradientOn,
               bg: rgb(bgColor), bgMid: threeColorOn ? rgb(bgMidColor) : nil,
               bg2: rgb(bg2Color), fg: rgb(fgColor),
@@ -2021,34 +1940,23 @@ final class MenuBarMirrorController {
         // If follow was already on, the didSet skipped — make the editing surface
         // reflect the imported slot rather than the standalone colors.
         if followAppearance { loadEditingSurface(slotSpec(editingSlot)) }
-        recolorStyle = RecolorStyle(rawValue: m.style ?? "") ?? .mirror
         enabled = m.enabled          // didSet starts/stops the engine — set last
         applyTheme()
     }
 
     func start() {
-        switch recolorStyle {
-        case .mirror:
-            permissionGranted = screenCapturePermissionNow()
-            engine.setTheme(currentTheme())
-            engine.setDisplays(snapshotDisplays())
-            engine.start()
-        case .tint:
-            tintOverlay.apply(currentTheme())
-            tintOverlay.start()
-        }
+        permissionGranted = screenCapturePermissionNow()
+        engine.setTheme(currentTheme())
+        engine.setDisplays(snapshotDisplays())
+        engine.start()
         statsTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                self.stats = self.recolorStyle == .mirror
-                    ? self.engine.snapshotStats()
-                    : MirrorStats(activeDisplays: self.tintOverlay.activeDisplays)
+                self.stats = self.engine.snapshotStats()
                 self.appearanceDidChange()   // self-heal if both observers miss a flip
                 // The permission/background probes cost a capture + full pixel
-                // scan each — mirror-only, and only while their notices can be
-                // seen. In tint mode the whole point is that nothing ever
-                // reads the screen.
-                if self.settingsWindowVisible && self.recolorStyle == .mirror { self.refreshChecks() }
+                // scan each — only run them while their notices can be seen.
+                if self.settingsWindowVisible { self.refreshChecks() }
             }
         }
     }
@@ -2070,7 +1978,6 @@ final class MenuBarMirrorController {
 
     func stop() {
         engine.stop()
-        tintOverlay.stop()
         statsTimer?.invalidate(); statsTimer = nil
         stats = MirrorStats()
     }
