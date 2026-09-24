@@ -41,11 +41,12 @@ ReBar reads the real bar and draws a click-through overlay on top of it,
 so clicks still land on the real items underneath. When the bar is hidden —
 by a full-screen app, or by the "Automatically hide and show the menu bar"
 setting — the overlay steps aside too, and comes back the moment the bar does,
-hover-reveals included. It reads the menu bar's own
+hover-reveals included. On macOS 27.2 and later it reads the menu bar's own
 window rather than the screen, one screenshot at a time, so macOS lights only
 the small screenshot dot and not the wide "your screen is being observed"
-capsule that a continuous capture raises. This still needs **Screen Recording**
-permission. The captured pixels never leave your Mac.
+capsule that a continuous capture raises; on earlier versions, expect the
+capsule — see [Compatibility](#compatibility). This still needs **Screen
+Recording** permission. The captured pixels never leave your Mac.
 
 ### Arrange
 
@@ -123,6 +124,20 @@ xcodegen generate
 
 macOS 15 or later. Color and Arrange depend on undocumented system behavior
 that Apple changes between releases, so expect them to be version-sensitive.
+ReBar is developed and verified on **macOS 27.2**.
+
+### The privacy indicator before macOS 27.2
+
+The quiet capture described under [Color](#color) — only the small screenshot
+dot, never the wide "your screen is being observed" capsule — depends on a
+change in macOS 27.2, where repeated one-shot window screenshots stopped
+raising the capsule. On macOS 27.0 the same call was measured raising a
+permanent one, and on releases older than 27 ReBar falls back to compositing
+the bar, which raises it as well.
+
+So on anything before 27.2, expect the capsule to show for as long as the
+Color tab is switched on. The small recording dot appears on every version,
+including 27.2 — no screen-reading app can avoid it.
 
 ## License
 
