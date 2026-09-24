@@ -118,3 +118,8 @@ xcodegen generate
 
 macOS 15 or later. Color and Arrange depend on undocumented system behavior
 that Apple changes between releases, so expect them to be version-sensitive.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
+Third-party attribution is in [NOTICE](NOTICE).
