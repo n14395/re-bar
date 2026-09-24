@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleIdentifier</key>
-	<string>com.n14395.re-bar</string>
+	<string>com.n14395.ReBar</string>
 	<key>CFBundleExecutable</key>
 	<string>ReBar</string>
 	<key>CFBundleIconFile</key>

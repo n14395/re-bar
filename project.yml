@@ -3,7 +3,7 @@
 #
 # This mirrors the SPM / Scripts/build-app.sh setup so the Xcode project and the
 # command-line build produce the same app:
-#   • same bundle id (com.n14395.re-bar) and Info.plist (used verbatim)
+#   • same bundle id (com.n14395.ReBar) and Info.plist (used verbatim)
 #   • same app icon (Resources/AppIcon.icns, referenced by CFBundleIconFile)
 #   • Apple Development signing → stable designated requirement, so macOS keeps
 #     granted permissions (Screen Recording, etc.) across rebuilds, exactly like
@@ -35,7 +35,7 @@ targets:
     settings:
       base:
         PRODUCT_NAME: ReBar
-        PRODUCT_BUNDLE_IDENTIFIER: com.n14395.re-bar
+        PRODUCT_BUNDLE_IDENTIFIER: com.n14395.ReBar
         # Use the hand-maintained Info.plist as-is (LSUIElement agent app, icon,
         # versions, usage strings) instead of an Xcode-generated one.
         INFOPLIST_FILE: Resources/Info.plist

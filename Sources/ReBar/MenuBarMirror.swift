@@ -112,7 +112,7 @@ private func menubarWindowOnscreen(_ wid: UInt32) -> Bool {
 // The composite path below stays as the fallback for anything this can't read.
 
 /// Opt-in tracing for the capture routes, off unless
-/// `defaults write com.n14395.re-bar mirror.debugLog -bool true`. Writes to
+/// `defaults write com.n14395.ReBar mirror.debugLog -bool true`. Writes to
 /// ~/Library/Logs/ReBar-mirror.log; used to diagnose Space-switch behaviour,
 /// where the interesting events are a second wide and invisible from outside.
 private let mirrorDebugLog = UserDefaults.standard.bool(forKey: "mirror.debugLog")
@@ -903,7 +903,7 @@ struct MirrorStats: Sendable {
 /// Which path the mirror reads the bar with. `auto` (the default) prefers the
 /// window-capture route and falls back to the composite whenever that can't
 /// produce a frame; the other two pin one path, for troubleshooting via
-/// `defaults write com.n14395.re-bar mirror.captureRoute window|composite|auto`.
+/// `defaults write com.n14395.ReBar mirror.captureRoute window|composite|auto`.
 enum CaptureRoute: String, Sendable {
     case auto, window, composite
     static var preferred: CaptureRoute {
@@ -916,7 +916,7 @@ private final class FlippedView: NSView { override var isFlipped: Bool { true } 
 // MARK: - Engine (background render loop + click-through overlay panels)
 
 private final class MirrorEngine: @unchecked Sendable {
-    private let q = DispatchQueue(label: "com.n14395.re-bar.mirror", qos: .userInteractive)
+    private let q = DispatchQueue(label: "com.n14395.ReBar.mirror", qos: .userInteractive)
     private let lock = NSLock()
 
     // shared state (lock-guarded)

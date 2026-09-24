@@ -30,7 +30,7 @@ APP_NAME="ReBar"
 BUILD_DIR="$PWD/build"
 APP_PATH="$BUILD_DIR/$APP_NAME.app"
 DMG_PATH="$BUILD_DIR/$APP_NAME.dmg"
-BUNDLE_ID="com.n14395.re-bar"
+BUNDLE_ID="com.n14395.ReBar"
 ENTITLEMENTS=""
 # Where --sparkle builds look for updates. `--sparkle --publish` attaches appcast.xml
 # to every GitHub release, and this URL always resolves to the newest release's copy.
