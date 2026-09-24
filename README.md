@@ -72,7 +72,12 @@ exports and imports its settings as JSON.
 
 ## Install
 
-Download the latest `.dmg` from the [Releases](../../releases) page, open it,
+```sh
+brew tap n14395/tap
+brew install --cask re-bar
+```
+
+Or download the latest `.dmg` from the [Releases](../../releases) page, open it,
 and drag **ReBar** to Applications.
 
 If macOS blocks the app the first time you open it, right-click it and choose
