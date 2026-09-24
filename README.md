@@ -1,4 +1,8 @@
-# ReBar
+<p align="center">
+  <img src="app-icon.png" alt="ReBar app icon" width="128" height="128">
+</p>
+
+<h1 align="center">ReBar</h1>
 
 ![Platform](https://img.shields.io/badge/macOS-15%2B-blue)
 ![Swift](https://img.shields.io/badge/Swift-6-orange)
