@@ -20,7 +20,7 @@ settings:
     # yields the same CN-based designated requirement build-app.sh relies on.
     DEVELOPMENT_TEAM: P52946XHRJ
     CODE_SIGN_STYLE: Automatic
-    MARKETING_VERSION: "1.1"
+    MARKETING_VERSION: "1.2"
     CURRENT_PROJECT_VERSION: "2"
     SWIFT_VERSION: "6.0"          # Swift 6 language mode, matching Package.swift
 targets:
